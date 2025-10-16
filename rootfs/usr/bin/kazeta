@@ -33,21 +33,31 @@ function start_playtime_capture {
 # wait up to 2 seconds for a cart
 for i in $(seq 1 20); do
 	cart_info=$(find ${BASE_EXT} -maxdepth 2 -name "*.kzi" | head -1)
-	if [[ -f "${cart_info}" ]]; then
+	cart_pkg=$(find ${BASE_EXT} -maxdepth 2 -name "*.kzp" | head -1)
+	if [[ -f "${cart_info}" ]] || [[ -f "${cart_pkg}" ]]; then
 		break
 	else
 		sleep 0.1
 	fi
 done
 
-
-if [[ ! -f "${cart_info}" ]]; then
+if [[ ! -f "${cart_info}" ]] && [[ ! -f "${cart_pkg}" ]]; then
 	# no cart found, start bios/memory management app
 	gamescope --filter pixel -- kazeta-bios
 	exit 0
 fi
 
-cart_path=$(dirname "${cart_info}")
+if [[ -f "${cart_pkg}" ]]; then
+	cart_path="${BASE_DIR}/run/pkg"
+	mkdir -p "${cart_path}"
+	pkexec kazeta-mount kzp "${cart_pkg}" "${cart_path}"
+	cart_info=$(find "${cart_path}" -maxdepth 2 -name "*.kzi" | head -1)
+	media_path=$(dirname "${cart_pkg}")
+else
+	cart_path=$(dirname "${cart_info}")
+	media_path="${cart_path}"
+fi
+
 cart_id="$(get_attribute 'Id' ${cart_info})"
 cart_icon="${cart_path}/$(get_attribute 'Icon' ${cart_info})"
 
@@ -69,11 +79,11 @@ fi
 
 runtime_name="$(get_attribute 'Runtime' ${cart_info})"
 if [ -n "$runtime_name" ]; then
-	runtime="${cart_path}/${runtime_name}"
+	runtime="${media_path}/${runtime_name}"
 	if [ ! -f "$runtime" ]; then
-		runtime="${cart_path}/${runtime_name}.kzr"
+		runtime="${media_path}/${runtime_name}.kzr"
 		if [ ! -f "$runtime" ]; then
-			runtime="$(ls ${cart_path}/${runtime_name}-*.kzr)"
+			runtime="$(ls ${media_path}/${runtime_name}-*.kzr)"
 			if [ ! -f "$runtime" ]; then
 				runtime="/usr/share/kazeta/runtimes/none.kzr"
 			fi
@@ -88,6 +98,7 @@ pkexec kazeta-mount "${lower}" "${upper}" "${work}" "${target}" "${runtime}" "${
 trap "\
 	popd; \
 	pkexec kazeta-mount --unmount "${target}" "${runtimedir}"; \
+	pkexec kazeta-mount kzp --unmount "${cart_path}"; \
 	rm -rf "${upper}/.kazeta/share"; \
 	rmdir --ignore-fail-on-non-empty "${upper}/.kazeta"; \
 " EXIT

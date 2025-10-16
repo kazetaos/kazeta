@@ -5,6 +5,16 @@ if [ $EUID -ne 0 ]; then
         exit 1
 fi
 
+if [ "$1" == "kzp" ]; then
+	if [ "$2" == "--unmount" ]; then
+		umount "$3"
+	else
+		mount "$2" "$3"
+	fi
+
+	exit 0
+fi
+
 if [ "$1" == "--unmount" ]; then
 	umount "$2"
 	umount "$3"
