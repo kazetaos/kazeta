@@ -24,10 +24,31 @@ function get_attribute {
 }
 
 function start_playtime_capture {
-	while true; do
-		sleep 60
+	echo "running" > /tmp/kazeta_playtime_capture_state
+	while [ "$(cat /tmp/kazeta_playtime_capture_state)" == "running" ]; do
+		sleep 60 &
+		echo $! > /tmp/kazeta_playtime_capture_sleep_pid
+		wait
 		date --iso-8601=seconds > .kazeta/var/playtime_end
 	done
+	echo "done" > /tmp/kazeta_playtime_capture_state
+}
+
+function stop_playtime_capture {
+	echo "shutdown" > /tmp/kazeta_playtime_capture_state
+	kill $(cat /tmp/kazeta_playtime_capture_sleep_pid)
+	while [ "$(cat /tmp/kazeta_playtime_capture_state)" != "done" ]; do
+		sleep 0.001
+	done
+}
+
+function cleanup {
+	stop_playtime_capture
+	popd
+	pkexec kazeta-mount --unmount "${target}" "${runtimedir}"
+	pkexec kazeta-mount kzp --unmount "${cart_path}"
+	rm -rf "${upper}/.kazeta/share"
+	rmdir --ignore-fail-on-non-empty "${upper}/.kazeta"
 }
 
 # wait up to 2 seconds for a cart
@@ -95,13 +116,7 @@ fi
 
 runtimedir="${BASE_DIR}/run/runtime"
 pkexec kazeta-mount "${lower}" "${upper}" "${work}" "${target}" "${runtime}" "${runtimedir}"
-trap "\
-	popd; \
-	pkexec kazeta-mount --unmount "${target}" "${runtimedir}"; \
-	pkexec kazeta-mount kzp --unmount "${cart_path}"; \
-	rm -rf "${upper}/.kazeta/share"; \
-	rmdir --ignore-fail-on-non-empty "${upper}/.kazeta"; \
-" EXIT
+trap cleanup EXIT
 
 export HOME="${BASE_DIR}/run/cart"
 
