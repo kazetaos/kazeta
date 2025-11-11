@@ -98,20 +98,27 @@ if [[ ! -d "${upper}" ]]; then
 	mkdir -p "${upper}"
 fi
 
+#Directory for all internal runtimes
+internal_runtime="/usr/share/kazeta/runtimes/"
+
 runtime_name="$(get_attribute 'Runtime' ${cart_info})"
 if [ -n "$runtime_name" ]; then
-	runtime="${media_path}/${runtime_name}"
+	#Checks for a runtime internally that matches
+	runtime="$(ls ${internal_runtime}/${runtime_name}-*.kzr)"
 	if [ ! -f "$runtime" ]; then
-		runtime="${media_path}/${runtime_name}.kzr"
+		runtime="${media_path}/${runtime_name}"
 		if [ ! -f "$runtime" ]; then
-			runtime="$(ls ${media_path}/${runtime_name}-*.kzr)"
+			runtime="${media_path}/${runtime_name}.kzr"
 			if [ ! -f "$runtime" ]; then
-				runtime="/usr/share/kazeta/runtimes/none.kzr"
+				runtime="$(ls ${media_path}/${runtime_name}-*.kzr)"
+				if [ ! -f "$runtime" ]; then
+					runtime="{$internal_runtime}/none.kzr"
+				fi
 			fi
 		fi
 	fi
 else
-	runtime="/usr/share/kazeta/runtimes/none.kzr"
+	runtime="{$internal_runtime}/none.kzr"
 fi
 
 runtimedir="${BASE_DIR}/run/runtime"
