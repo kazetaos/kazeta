@@ -99,7 +99,7 @@ if [[ ! -d "${upper}" ]]; then
 fi
 
 #Directory for all internal runtimes
-internal_runtime="/usr/share/kazeta/runtimes/"
+internal_runtime="/usr/share/kazeta/runtimes"
 
 runtime_name="$(get_attribute 'Runtime' ${cart_info})"
 if [ -n "$runtime_name" ]; then
