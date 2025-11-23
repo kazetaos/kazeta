@@ -115,14 +115,14 @@ if [ -n "$runtime_name" ]; then
 				if [ ! -f "$runtime" ]; then
 					runtime="$(ls ${media_path}/${runtime_name}-*.kzr)"
 					if [ ! -f "$runtime" ]; then
-						runtime="{$internal_runtime}/none.kzr"
+						runtime="${internal_runtime}/none.kzr"
 					fi
 				fi
 			fi
 		fi
 	fi
 else
-	runtime="{$internal_runtime}/none.kzr"
+	runtime="${internal_runtime}/none.kzr"
 fi
 
 runtimedir="${BASE_DIR}/run/runtime"
