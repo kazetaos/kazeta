@@ -47,8 +47,8 @@ function cleanup {
 	popd
 	pkexec kazeta-mount --unmount "${target}" "${runtimedir}"
 	pkexec kazeta-mount kzp --unmount "${cart_path}"
-	rm -rf "${upper}/.kazeta/share"
-	rmdir --ignore-fail-on-non-empty "${upper}/.kazeta"
+	rm -rf "${upper}.kazeta/share"
+	rmdir --ignore-fail-on-non-empty "${upper}.kazeta"
 }
 
 # wait up to 2 seconds for a cart
