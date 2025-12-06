@@ -27,6 +27,7 @@ export PACKAGES="\
 	lib32-vulkan-intel \
 	lib32-vulkan-mesa-layers \
 	lib32-vulkan-radeon \
+	lib32-sdl12-compat \
 	lightdm \
 	linux-firmware \
 	nvidia-open \
