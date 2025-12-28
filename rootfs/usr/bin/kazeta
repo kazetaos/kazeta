@@ -51,16 +51,22 @@ function cleanup {
 	rmdir --ignore-fail-on-non-empty "${upper}/.kazeta"
 }
 
-# wait up to 2 seconds for a cart
-for i in $(seq 1 20); do
-	cart_info=$(find ${BASE_EXT} -maxdepth 2 -name "*.kzi" | head -1)
-	cart_pkg=$(find ${BASE_EXT} -maxdepth 2 -name "*.kzp" | head -1)
-	if [[ -f "${cart_info}" ]] || [[ -f "${cart_pkg}" ]]; then
-		break
-	else
-		sleep 0.1
-	fi
-done
+if [[ "$1" == *.kzi ]]; then
+	cart_info=$(realpath "$1")
+elif [[ "$1" == *.kzp ]]; then
+	cart_pkg=$(realpath "$1")
+else
+	# wait up to 2 seconds for a cart
+	for i in $(seq 1 20); do
+		cart_info=$(find ${BASE_EXT} -maxdepth 2 -name "*.kzi" | head -1)
+		cart_pkg=$(find ${BASE_EXT} -maxdepth 2 -name "*.kzp" | head -1)
+		if [[ -f "${cart_info}" ]] || [[ -f "${cart_pkg}" ]]; then
+			break
+		else
+			sleep 0.1
+		fi
+	done
+fi
 
 if [[ ! -f "${cart_info}" ]] && [[ ! -f "${cart_pkg}" ]]; then
 	# no cart found, start bios/memory management app
