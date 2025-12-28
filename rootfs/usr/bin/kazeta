@@ -44,6 +44,7 @@ function stop_playtime_capture {
 
 function cleanup {
 	stop_playtime_capture
+	rm -f .local/share/gvfs-metadata
 	popd
 	pkexec kazeta-mount --unmount "${target}" "${runtimedir}"
 	pkexec kazeta-mount kzp --unmount "${cart_path}"
@@ -103,6 +104,10 @@ if [[ ! -d "${upper}" ]]; then
 	rm -f "${upper}"
 	mkdir -p "${upper}"
 fi
+
+# workaround for gvfs-metadata preventing unmount
+mkdir -p "${upper}/.local/share"
+touch "${upper}/.local/share/gvfs-metadata"
 
 runtime_name="$(get_attribute 'Runtime' ${cart_info})"
 if [ -n "$runtime_name" ]; then
