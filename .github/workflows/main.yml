@@ -64,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install bios app dependencies
         id: bios_dependencies
-        run: apt install libudev-dev
+        run: sudo apt install -y libudev-dev
       - name: Build bios app
         id: build_bios
         run: cd bios && cargo build --release
