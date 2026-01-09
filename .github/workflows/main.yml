@@ -57,8 +57,24 @@ jobs:
             name: AUR-packages-${{ matrix.package }}
             path: aur-pkgs/*.pkg.tar*
 
+  build-bios-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v4
+      - name: Build bios app
+        id: build_bios
+        run: cd bios && cargo build --release
+      - name: Upload bios app binary
+        id: upload_bios
+        uses: actions/upload-artifact@v4
+        with:
+          name: kazeta-bios
+          path: bios/target/release/kazeta-bios
+
   build:
     needs:
+     - build-bios-app
      - build-docker-image
      - aur-pkgbuild
     name: Build OS UNSTABLE image

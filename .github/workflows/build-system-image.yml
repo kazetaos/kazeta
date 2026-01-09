@@ -44,6 +44,12 @@ jobs:
             pattern: AUR-packages*
             merge-multiple: true
             path: aur-pkgs/
+      - name: Download bios app binary
+        id: download_bios
+        uses: actions/download-artifact@v4
+        with:
+          name: kazeta-bios
+          path: rootfs/usr/bin/
       - name: Build system image
         id: build_image
         run: |
