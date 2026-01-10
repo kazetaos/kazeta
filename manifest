@@ -86,7 +86,6 @@ postinstallhook() {
 
 	# Set permissions
 	chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
-	chown -R ${USERNAME}:${USERNAME} /var/kazeta
 
 	# Automount storage to /run/media
 	sed -i -e 's,mediadir=/media,mediadir=/run/media,' /usr/bin/media-automount
