@@ -1,6 +1,6 @@
 #! /bin/bash
 
-export VERSION="2025-0"
+export VERSION="2026-0"
 export SYSTEM_DESC="Kazeta"
 export SYSTEM_NAME="kazeta"
 export USERNAME="gamer"

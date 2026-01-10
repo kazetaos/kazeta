@@ -1198,7 +1198,7 @@ fn render_main_menu(
 
     // Draw logo and version number
     draw_texture(logo, (SCREEN_WIDTH as f32 - 166.0)/2.0, 30.0, WHITE);
-    text(&ctx, "V2025.0", SCREEN_WIDTH as f32 - 90.0, SCREEN_HEIGHT as f32 - 20.0);
+    text(&ctx, "V2026.0", SCREEN_WIDTH as f32 - 90.0, SCREEN_HEIGHT as f32 - 20.0);
 }
 
 #[macroquad::main(window_conf)]
