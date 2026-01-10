@@ -16,7 +16,6 @@ export PACKAGES="\
 	accountsservice \
 	fuse2 \
 	fuse3 \
-	fuse-overlayfs \
 	gamescope \
 	htop \
 	inputplumber \
@@ -25,7 +24,6 @@ export PACKAGES="\
 	lib32-nvidia-utils \
 	lib32-pipewire \
 	lib32-vulkan-intel \
-	lib32-vulkan-mesa-layers \
 	lib32-vulkan-radeon \
 	lightdm \
 	linux-firmware \
@@ -38,7 +36,6 @@ export PACKAGES="\
 	sudo \
 	vim \
 	vulkan-intel \
-	vulkan-mesa-layers \
 	vulkan-radeon \
 	wireplumber \
 "
