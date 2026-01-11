@@ -50,6 +50,9 @@ jobs:
         with:
           name: kazeta-bios
           path: rootfs/usr/bin/
+      - name: Set executable permissions on bios app binary
+        id: bios_permissions
+        run: chmod +x rootfs/usr/bin/kazeta-bios
       - name: Build system image
         id: build_image
         run: |
