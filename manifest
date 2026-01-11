@@ -51,6 +51,8 @@ export SERVICES="\
 	fstrim.timer \
 	inputplumber \
 	lightdm \
+	systemd-networkd \
+	systemd-resolved \
 "
 
 export FILES_TO_DELETE="\
