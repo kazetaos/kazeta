@@ -13,10 +13,10 @@ export BUG_REPORT_URL="https://github.com/kazetaos/kazeta/issues"
 export KERNEL_PACKAGE="linux"
 
 export PACKAGES="\
-	accountsservice \
 	fuse2 \
 	fuse3 \
 	gamescope \
+	greetd \
 	htop \
 	inputplumber \
 	less \
@@ -25,7 +25,6 @@ export PACKAGES="\
 	lib32-pipewire \
 	lib32-vulkan-intel \
 	lib32-vulkan-radeon \
-	lightdm \
 	linux-firmware \
 	nvidia-open \
 	nvidia-utils \
@@ -49,8 +48,8 @@ export AUR_PACKAGES="\
 
 export SERVICES="\
 	fstrim.timer \
+	greetd \
 	inputplumber \
-	lightdm \
 	systemd-networkd \
 	systemd-resolved \
 "

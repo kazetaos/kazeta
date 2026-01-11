@@ -1,0 +1,6 @@
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/bin/kazeta-session"
+user = "gamer"

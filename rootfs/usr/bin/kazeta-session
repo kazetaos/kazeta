@@ -2,7 +2,7 @@
 
 # ensure inputplumber manages all controllers
 for i in $(seq 1 100); do
-        inputplumber devices manage-all --enable
+        inputplumber devices manage-all --enable > /dev/null
 
         if [ "$?" == "0" ]; then
                 break
