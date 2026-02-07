@@ -93,6 +93,6 @@ postinstallhook() {
 	# Force Xbox 360 emulation for all controller devices
 	sed -i -e 's/- xbox-elite/- xb360/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- xbox-series/- xb360/' /usr/share/inputplumber/devices/*.yaml
-	sed -i -e 's/- ds5/- xb360/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- ds5-edge/- xb360/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- ds5/- xb360/' /usr/share/inputplumber/devices/*.yaml
 }
