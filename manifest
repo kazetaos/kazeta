@@ -91,8 +91,12 @@ postinstallhook() {
 	sed -i -e 's,}.$TYPE",}",' /usr/bin/media-automount
 
 	# Force Xbox 360 emulation for all controller devices
-	sed -i -e 's/- xbox-elite/- xb360/' /usr/share/inputplumber/devices/*.yaml
-	sed -i -e 's/- xbox-series/- xb360/' /usr/share/inputplumber/devices/*.yaml
-	sed -i -e 's/- ds5-edge/- xb360/' /usr/share/inputplumber/devices/*.yaml
-	sed -i -e 's/- ds5/- xb360/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- hori-steam/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- gamepad/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- deck-uhid/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- deck/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- xbox-elite/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- xb360/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- ds5-edge/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+	sed -i -e 's/- ds5/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
 }
