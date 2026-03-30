@@ -103,4 +103,7 @@ postinstallhook() {
 	sed -i -e 's/- xb360/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- ds5-edge/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- ds5/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
+
+	# Create system users and avoid failure at runtime due to read-only file system
+	systemd-sysusers
 }
