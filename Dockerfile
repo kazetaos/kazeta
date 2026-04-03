@@ -1,4 +1,4 @@
-FROM greyltc/archlinux-aur:latest
+FROM archlinux:base-devel
 LABEL contributor="shadowapex@gmail.com"
 COPY rootfs/etc/pacman.conf /etc/pacman.conf
 RUN echo -e "keyserver-options auto-key-retrieve" >> /etc/pacman.d/gnupg/gpg.conf && \
