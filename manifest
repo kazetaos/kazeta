@@ -106,5 +106,5 @@ postinstallhook() {
 
 	# Create system users and avoid failure at runtime due to read-only file system
 	systemd-sysusers
-	systemctl disable systemd-sysusers.service
+	systemctl mask systemd-sysusers.service
 }
