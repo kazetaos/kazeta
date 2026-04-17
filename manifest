@@ -94,6 +94,9 @@ postinstallhook() {
 	# Fix failure to mount SD cards flashed with disk images
 	sed -i -e 's,mmcblk\[0-9\]p\[0-9\],mmcblk\[0-9\]\*,' /usr/lib/udev/rules.d/99-media-automount.rules
 
+	# Add support for automounting optical media
+	echo 'KERNEL=="sr[0-9]*", ACTION=="change",	RUN+="/usr/bin/systemctl --no-block restart media-automount@%k.service"' >> /usr/lib/udev/rules.d/99-media-automount.rules
+
 	# Force Xbox 360 emulation for all controller devices
 	sed -i -e 's/- hori-steam/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- gamepad/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
