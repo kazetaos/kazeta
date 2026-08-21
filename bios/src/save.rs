@@ -264,7 +264,13 @@ pub fn is_cart(drive_name: &str) -> bool {
     let save_dir = get_save_dir_from_drive_name(drive_name);
     let mount_point: String = Path::new(&save_dir).parent().unwrap().parent().unwrap().display().to_string();
 
-    if let Ok(files) = find_files_by_extension(mount_point, "kzi", 1, true) {
+    if let Ok(files) = find_files_by_extension(&mount_point, "kzi", 1, true) {
+        if files.len() > 0 {
+            return true;
+        }
+    }
+
+    if let Ok(files) = find_files_by_extension(&mount_point, "kzp", 1, true) {
         if files.len() > 0 {
             return true;
         }
@@ -275,6 +281,12 @@ pub fn is_cart(drive_name: &str) -> bool {
 
 pub fn is_cart_connected() -> bool {
     if let Ok(files) = find_files_by_extension("/run/media", "kzi", 2, true) {
+        if files.len() > 0 {
+            return true;
+        }
+    }
+
+    if let Ok(files) = find_files_by_extension("/run/media", "kzp", 2, true) {
         if files.len() > 0 {
             return true;
         }
