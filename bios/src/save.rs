@@ -124,16 +124,9 @@ fn search_breadth_first(
     }
 }
 
-pub fn get_save_dir_from_drive_name(drive_name: &str) -> String {
-    let base_dir = dirs::home_dir().unwrap().join(".local/share/kazeta");
+pub fn get_base_dir_from_drive_name(drive_name: &str) -> String {
     if drive_name == "internal" || drive_name.is_empty() {
-        let save_dir = base_dir.join("saves/default");
-        if !save_dir.exists() {
-            fs::create_dir_all(&save_dir).unwrap_or_else(|e| {
-                eprintln!("Failed to create save directory: {}", e);
-            });
-        }
-        save_dir.to_string_lossy().into_owned()
+        dirs::home_dir().unwrap().join(".local/share/kazeta").to_string_lossy().to_string()
     } else {
         let base_ext = if Path::new("/media").read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
             if Path::new(&format!("/run/media/{}", whoami::username())).exists() {
@@ -145,7 +138,22 @@ pub fn get_save_dir_from_drive_name(drive_name: &str) -> String {
             "/media".to_string()
         };
 
-        let save_dir = Path::new(&base_ext).join(drive_name).join("kazeta/saves");
+        Path::new(&base_ext).join(drive_name).to_string_lossy().to_string()
+    }
+}
+
+pub fn get_save_dir_from_drive_name(drive_name: &str) -> String {
+    let base_dir = get_base_dir_from_drive_name(drive_name);
+    if drive_name == "internal" || drive_name.is_empty() {
+        let save_dir = Path::new(&base_dir).join("saves/default");
+        if !save_dir.exists() {
+            fs::create_dir_all(&save_dir).unwrap_or_else(|e| {
+                eprintln!("Failed to create save directory: {}", e);
+            });
+        }
+        save_dir.to_string_lossy().into_owned()
+    } else {
+        let save_dir = Path::new(&base_dir).join("kazeta/saves");
         if !save_dir.exists() {
             fs::create_dir_all(&save_dir).unwrap_or_else(|e| {
                 eprintln!("Failed to create save directory: {}", e);
@@ -252,6 +260,10 @@ pub fn has_save_dir(drive_name: &str) -> bool {
         return true;
     }
 
+    if is_cart(drive_name) {
+        return false;
+    }
+
     let save_dir = get_save_dir_from_drive_name(drive_name);
     Path::new(&save_dir).exists()
 }
@@ -261,8 +273,7 @@ pub fn is_cart(drive_name: &str) -> bool {
         return false;
     }
 
-    let save_dir = get_save_dir_from_drive_name(drive_name);
-    let mount_point: String = Path::new(&save_dir).parent().unwrap().parent().unwrap().display().to_string();
+    let mount_point: String = get_base_dir_from_drive_name(drive_name);
 
     if let Ok(files) = find_files_by_extension(&mount_point, "kzi", 1, true) {
         if files.len() > 0 {
