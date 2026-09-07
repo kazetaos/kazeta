@@ -82,7 +82,6 @@ fi
 
 if [[ -f "${cart_pkg}" ]]; then
 	cart_path="${BASE_DIR}/run/pkg"
-	mkdir -p "${cart_path}"
 	pkexec kazeta-mount kzp "${cart_pkg}" "${cart_path}"
 	cart_info=$(find "${cart_path}" -maxdepth 2 -name "*.kzi" | head -1)
 	media_path=$(dirname "${cart_pkg}")
