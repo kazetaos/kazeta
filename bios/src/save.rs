@@ -405,151 +405,168 @@ pub fn copy_save(cart_id: &str, from_drive: &str, to_drive: &str, progress: Arc<
     // Copy save data
     let result = if from_drive == "internal" {
         // Internal to external: create tar archive
-        eprintln!("Starting internal to external copy for {}", cart_id);
-        let file = fs::File::create(&to_path_tar).map_err(|e| format!("Failed to create destination file: {}", e))?;
-        let mut builder = Builder::new(file);
+        //
+        // NOTE: everything that can fail here happens inside this closure and
+        // returns `Result<(), String>` from it (not from `copy_save`). That
+        // matters: if any of these `?`s returned from `copy_save` directly,
+        // execution would skip the cleanup logic below entirely and leave a
+        // half-written, truncated .tar file sitting on the destination drive.
+        (|| -> Result<(), String> {
+            eprintln!("Starting internal to external copy for {}", cart_id);
+            let file = fs::File::create(&to_path_tar).map_err(|e| format!("Failed to create destination file: {}", e))?;
+            let mut builder = Builder::new(file);
 
-        // Calculate total size for progress reporting
-        let mut total_size = 0;
-        for entry in walkdir::WalkDir::new(&from_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let path = e.path();
-                // Skip excluded directories and their contents
-                !should_exclude_path(path) &&
-                path.is_file()
-            }) {
-            total_size += entry.metadata().map_err(|e| format!("Failed to get metadata: {}", e))?.len();
-        }
+            // Calculate total size for progress reporting
+            let mut total_size = 0;
+            for entry in walkdir::WalkDir::new(&from_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    // Skip excluded directories and their contents
+                    !should_exclude_path(path) &&
+                    path.is_file()
+                }) {
+                total_size += entry.metadata().map_err(|e| format!("Failed to get metadata: {}", e))?.len();
+            }
 
-        eprintln!("Total size to archive: {} bytes", total_size);
-        if total_size == 0 {
-            return Err("No files found to archive".to_string());
-        }
+            eprintln!("Total size to archive: {} bytes", total_size);
+            if total_size == 0 {
+                return Err("No files found to archive".to_string());
+            }
 
-        // Add the entire directory to the archive, excluding ignored directories
-        let mut current_size = 0;
-        for entry in walkdir::WalkDir::new(&from_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let path = e.path();
-                // Skip excluded directories and their contents
-                !should_exclude_path(path) &&
-                path.is_file()
-            }) {
-            let path = entry.path();
-            // Get the relative path from the source directory
-            let name = path.strip_prefix(&from_path)
-                .map_err(|e| format!("Failed to get relative path: {}", e))?
-                .to_str()
-                .ok_or_else(|| "Invalid path encoding".to_string())?;
+            // Add the entire directory to the archive, excluding ignored directories
+            let mut current_size = 0;
+            for entry in walkdir::WalkDir::new(&from_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    // Skip excluded directories and their contents
+                    !should_exclude_path(path) &&
+                    path.is_file()
+                }) {
+                let path = entry.path();
+                // Get the relative path from the source directory
+                let name = path.strip_prefix(&from_path)
+                    .map_err(|e| format!("Failed to get relative path: {}", e))?;
 
-            let file_size = entry.metadata().map_err(|e| format!("Failed to get file metadata: {}", e))?.len();
-            eprintln!("Adding file to archive: {} ({} bytes)", name, file_size);
+                let file_size = entry.metadata().map_err(|e| format!("Failed to get file metadata: {}", e))?.len();
+                eprintln!("Adding file to archive: {} ({} bytes)", name.display(), file_size);
 
-            let mut file = fs::File::open(path).map_err(|e| format!("Failed to open source file: {}", e))?;
+                let mut file = fs::File::open(path).map_err(|e| format!("Failed to open source file: {}", e))?;
 
-            // Create a new header with the correct path
-            let mut header = tar::Header::new_gnu();
-            header.set_path(name).map_err(|e| format!("Failed to set path in header: {}", e))?;
-            header.set_size(file_size);
-            header.set_cksum();
+                // Build the header and let `append_data` pick the path. Unlike
+                // manually constructing a `Header` and calling `set_path()`
+                // (which fails for any relative path over ~100 bytes, since
+                // it doesn't know how to emit a GNU long-name extension),
+                // `append_data` transparently writes a GNU long-name entry
+                // first when the path doesn't fit in the header's name field.
+                // This is essential for Proton/Wine saves, whose paths under
+                // `.kazeta/var/prefix/drive_c/users/...` are routinely much
+                // longer than 100 bytes and were previously causing this call
+                // to fail partway through the archive.
+                let mut header = tar::Header::new_gnu();
+                header.set_size(file_size);
+                header.set_cksum();
+                builder.append_data(&mut header, name, &mut file)
+                    .map_err(|e| format!("Failed to append file to archive: {}", e))?;
+                sync_to_disk();
 
-            // Write the header and file contents
-            builder.append(&header, &mut file).map_err(|e| format!("Failed to append file to archive: {}", e))?;
+                current_size += file_size;
+                progress.store((current_size * 100 / total_size) as u16, Ordering::SeqCst);
+            }
+
+            eprintln!("Finished creating archive, final size: {} bytes", current_size);
+            if current_size == 0 {
+                return Err("No files were added to the archive".to_string());
+            }
+
+            builder.finish().map_err(|e| format!("Failed to finish archive: {}", e))?;
             sync_to_disk();
 
-            current_size += file_size;
-            progress.store((current_size * 100 / total_size) as u16, Ordering::SeqCst);
-        }
+            // Verify the archive was created and has content
+            let archive_size = fs::metadata(&to_path_tar).map_err(|e| format!("Failed to get archive metadata: {}", e))?.len();
+            eprintln!("Archive file size: {} bytes", archive_size);
+            if archive_size == 0 {
+                return Err("Created archive is empty".to_string());
+            }
 
-        eprintln!("Finished creating archive, final size: {} bytes", current_size);
-        if current_size == 0 {
-            return Err("No files were added to the archive".to_string());
-        }
-
-        builder.finish().map_err(|e| format!("Failed to finish archive: {}", e))?;
-        sync_to_disk();
-
-        // Verify the archive was created and has content
-        let archive_size = fs::metadata(&to_path_tar).map_err(|e| format!("Failed to get archive metadata: {}", e))?.len();
-        eprintln!("Archive file size: {} bytes", archive_size);
-        if archive_size == 0 {
-            return Err("Created archive is empty".to_string());
-        }
-
-        Ok(())
+            Ok(())
+        })()
     } else if to_drive == "internal" {
         // External to internal: extract tar archive
-        eprintln!("Starting external to internal copy for {}", cart_id);
-        fs::create_dir_all(&to_path).map_err(|e| format!("Failed to create destination directory: {}", e))?;
+        (|| -> Result<(), String> {
+            eprintln!("Starting external to internal copy for {}", cart_id);
+            fs::create_dir_all(&to_path).map_err(|e| format!("Failed to create destination directory: {}", e))?;
 
-        let file = fs::File::open(&from_path_tar).map_err(|e| format!("Failed to open source archive: {}", e))?;
-        let file_size = file.metadata().map_err(|e| format!("Failed to get archive metadata: {}", e))?.len();
-        eprintln!("Archive size: {} bytes", file_size);
+            let file = fs::File::open(&from_path_tar).map_err(|e| format!("Failed to open source archive: {}", e))?;
+            let file_size = file.metadata().map_err(|e| format!("Failed to get archive metadata: {}", e))?.len();
+            eprintln!("Archive size: {} bytes", file_size);
 
-        let mut archive = Archive::new(file);
-        let mut current_size = 0;
+            let mut archive = Archive::new(file);
+            let mut current_size = 0;
 
-        for entry in archive.entries().map_err(|e| format!("Failed to read archive entries: {}", e))? {
-            let mut entry = entry.map_err(|e| format!("Failed to read archive entry: {}", e))?;
-            let path = entry.path().map_err(|e| format!("Failed to get entry path: {}", e))?;
-            let entry_size = entry.header().size().unwrap_or(0);
-            eprintln!("Extracting: {} ({} bytes)", path.display(), entry_size);
+            for entry in archive.entries().map_err(|e| format!("Failed to read archive entries: {}", e))? {
+                let mut entry = entry.map_err(|e| format!("Failed to read archive entry: {}", e))?;
+                let path = entry.path().map_err(|e| format!("Failed to get entry path: {}", e))?.into_owned();
+                let entry_size = entry.header().size().unwrap_or(0);
+                eprintln!("Extracting: {} ({} bytes)", path.display(), entry_size);
 
-            // Ensure the parent directory exists
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(to_path.join(parent))
-                    .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+                // Ensure the parent directory exists
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(to_path.join(parent))
+                        .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+                }
+
+                // Extract the file
+                entry.unpack_in(&to_path)
+                    .map_err(|e| format!("Failed to extract file: {}", e))?;
+
+                current_size += entry_size;
+                progress.store((current_size * 100 / file_size) as u16, Ordering::SeqCst);
             }
 
-            // Extract the file
-            entry.unpack_in(&to_path)
-                .map_err(|e| format!("Failed to extract file: {}", e))?;
+            // Verify extraction
+            let mut extracted_size = 0;
+            for entry in walkdir::WalkDir::new(&to_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file()) {
+                extracted_size += entry.metadata()
+                    .map_err(|e| format!("Failed to get extracted file metadata: {}", e))?
+                    .len();
+            }
+            eprintln!("Total extracted size: {} bytes", extracted_size);
 
-            current_size += entry_size;
-            progress.store((current_size * 100 / file_size) as u16, Ordering::SeqCst);
-        }
+            if extracted_size == 0 {
+                return Err("No files were extracted from the archive".to_string());
+            }
 
-        // Verify extraction
-        let mut extracted_size = 0;
-        for entry in walkdir::WalkDir::new(&to_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file()) {
-            extracted_size += entry.metadata()
-                .map_err(|e| format!("Failed to get extracted file metadata: {}", e))?
-                .len();
-        }
-        eprintln!("Total extracted size: {} bytes", extracted_size);
-
-        if extracted_size == 0 {
-            return Err("No files were extracted from the archive".to_string());
-        }
-
-        Ok(())
+            Ok(())
+        })()
     } else {
         // External to external: direct copy with progress
-        let file_size = fs::metadata(&from_path_tar).map_err(|e| e.to_string())?.len();
-        let mut source = fs::File::open(&from_path_tar).map_err(|e| e.to_string())?;
-        let mut dest = fs::File::create(&to_path_tar).map_err(|e| e.to_string())?;
+        (|| -> Result<(), String> {
+            let file_size = fs::metadata(&from_path_tar).map_err(|e| e.to_string())?.len();
+            let mut source = fs::File::open(&from_path_tar).map_err(|e| e.to_string())?;
+            let mut dest = fs::File::create(&to_path_tar).map_err(|e| e.to_string())?;
 
-        let mut buffer = [0; 8192];
-        let mut current_size = 0;
-        loop {
-            let bytes_read = source.read(&mut buffer).map_err(|e| e.to_string())?;
-            if bytes_read == 0 {
-                break;
+            let mut buffer = [0; 8192];
+            let mut current_size = 0;
+            loop {
+                let bytes_read = source.read(&mut buffer).map_err(|e| e.to_string())?;
+                if bytes_read == 0 {
+                    break;
+                }
+                dest.write_all(&buffer[..bytes_read]).map_err(|e| e.to_string())?;
+                sync_to_disk();
+
+                current_size += bytes_read as u64;
+                progress.store((current_size * 100 / file_size) as u16, Ordering::SeqCst);
             }
-            dest.write_all(&buffer[..bytes_read]).map_err(|e| e.to_string())?;
-            sync_to_disk();
-
-            current_size += bytes_read as u64;
-            progress.store((current_size * 100 / file_size) as u16, Ordering::SeqCst);
-        }
-        Ok(())
+            Ok(())
+        })()
     };
 
     // If the main copy operation failed, clean up and return error
