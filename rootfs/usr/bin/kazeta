@@ -57,10 +57,10 @@ if [[ "$1" == *.kzi ]]; then
 elif [[ "$1" == *.kzp ]]; then
 	cart_pkg=$(realpath "$1")
 else
-	# wait up to 2 seconds for a cart, 6 seconds if optical drive detected
+	# wait up to 2 seconds for a cart, 10 seconds if optical drive detected
 	wait_time=20
 	if ls /dev/sr* &> /dev/null; then
-		wait_time=60
+		wait_time=100
 	fi
 
 	for i in $(seq 1 20); do
