@@ -97,7 +97,7 @@ postinstallhook() {
 	# Add support for automounting optical media
 	echo 'KERNEL=="sr[0-9]*", ACTION=="change",	RUN+="/usr/bin/systemctl --no-block restart media-automount@%k.service"' >> /usr/lib/udev/rules.d/99-media-automount.rules
 
-	# Force Xbox 360 emulation for all controller devices
+	# Force Xbox emulation for all controller devices
 	sed -i -e 's/- hori-steam/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- gamepad/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
 	sed -i -e 's/- deck-uhid/- xbox-series/' /usr/share/inputplumber/devices/*.yaml
