@@ -1130,6 +1130,29 @@ fn create_error_dialog(message: String) -> Dialog {
     }
 }
 
+// Update disabled state of all dialog options that depend on storage media presence
+fn update_dialog_options_disabled_state(dialogs: &mut Vec<Dialog>, media: &Vec<StorageMedia>) {
+    let has_external_devices = media.len() > 1;
+    for dialog in dialogs.iter_mut() {
+        match dialog.id.as_str() {
+            "main" => {
+                if let Some(copy_option) = dialog.options.iter_mut().find(|o| o.value == "COPY") {
+                    copy_option.disabled = !has_external_devices;
+                }
+            },
+            "copy_storage_select" => {
+                for option in dialog.options.iter_mut() {
+                    if option.value == "CANCEL" {
+                        continue;
+                    }
+                    option.disabled = !media.iter().any(|d| d.id == option.value);
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum DialogState {
     None,
@@ -1464,7 +1487,9 @@ async fn main() {
                             memories = Vec::new();
                         }
                         state.needs_memory_refresh = false;
-                        dialogs.clear();
+
+                        // Piggy backing on the lock we already have
+                        update_dialog_options_disabled_state(&mut dialogs, &state.media);
                     }
                 }
 
@@ -1760,6 +1785,7 @@ async fn main() {
                         } else {
                             state.needs_memory_refresh = true;
                             dialog_state = DialogState::None;
+                            dialogs.clear();
                             sound_effects.play_back();
                         }
                     }
