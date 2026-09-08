@@ -973,7 +973,7 @@ fn render_dialog(
 
         for (i, option) in dialog.options.iter().enumerate() {
             let y_pos = (FONT_SIZE*10 + FONT_SIZE*2*(i as u16)) as f32;
-            let shake_offset = if option.disabled {
+            let shake_offset = if option.disabled && i == dialog.selection {
                 animation_state.calculate_shake_offset(ShakeTarget::Dialog)
             } else {
                 0.0
