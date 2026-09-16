@@ -36,7 +36,7 @@ if [ "$1" == "install" ]; then
 	mkdir -p "$runtimedir"
 
 	mount "$runtime" "$runtimedir"
-	mount -t overlay overlay -o metacopy=on,lowerdir="$runtimedir",upperdir="$gamedir",workdir="$workdir" "$targetdir"
+	mount -t overlay overlay -o metacopy=on,xino=off,lowerdir="$runtimedir",upperdir="$gamedir",workdir="$workdir" "$targetdir"
 
 	exit 0
 fi
@@ -62,5 +62,6 @@ else
 	mount "$runtime" "$runtimedir"
 
 	# metacopy=on reduces the pressure vessel writes
-	mount -t overlay overlay -o metacopy=on,lowerdir="$lowerdir:$runtimedir",upperdir="$upperdir",workdir="$workdir" "$targetdir"
+	# xino=off fixes 32-bit applications crashing
+	mount -t overlay overlay -o metacopy=on,xino=off,lowerdir="$lowerdir:$runtimedir",upperdir="$upperdir",workdir="$workdir" "$targetdir"
 fi
