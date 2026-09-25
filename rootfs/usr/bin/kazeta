@@ -134,11 +134,11 @@ pkexec kazeta-mount "${lower}" "${upper}" "${work}" "${target}" "${runtime}" "${
 trap cleanup EXIT
 
 export HOME="${BASE_DIR}/run/cart"
+export XDG_CONFIG_HOME="${HOME}/.config"
+export XDG_DATA_HOME="${HOME}/.local/share"
+export XDG_CACHE_HOME="${HOME}/.cache"
+export XDG_STATE_HOME="${HOME}/.local/state"
 
-unset XDG_CONFIG_HOME
-unset XDG_CACHE_HOME
-unset XDG_DATA_HOME
-unset XDG_STATE_HOME
 pushd "${HOME}"
 
 cart_exec="$(get_attribute 'Exec' ${cart_info})"
