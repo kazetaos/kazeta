@@ -18,7 +18,8 @@ const EXCLUDED_DIRS: &[&str] = &[
     ".kazeta/share",
     ".kazeta/var/prefix/dosdevices",
     ".kazeta/var/prefix/drive_c/windows",
-    ".kazeta/var/prefix/pfx"
+    ".kazeta/var/prefix/pfx",
+    ".local/share/gvfs-metadata"
 ];
 
 fn should_exclude_path(path: &Path) -> bool {
