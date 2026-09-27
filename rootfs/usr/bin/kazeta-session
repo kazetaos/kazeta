@@ -18,31 +18,15 @@ for i in $(seq 1 20); do
     sleep 0.1
 done
 
+# remember audio settings
+mkdir -p /var/kazeta/state/wireplumber
+
 # hack to fix bios app audio
 wpctl status > /dev/null
 
 # start session
 mv /var/kazeta/session.log /var/kazeta/session.log.old
-/usr/bin/kazeta > /var/kazeta/session.log 2>&1 &
-
-# default to using HDMI audio output and set a reasonable volume
-if [ ! -e /var/kazeta/state/wireplumber ]; then
-	mkdir -p /var/kazeta/state/wireplumber
-
-	for i in $(seq 1 60); do
-		sink_id=$(wpctl status --name | grep output | grep hdmi | head -1 | grep -oE " [0-9]+\. " | tr -d ' .')
-		wpctl set-default $sink_id
-
-		if [ "$?" == "0" ]; then
-			wpctl set-volume $sink_id 0.8
-			break
-		fi
-
-		sleep 1
-	done
-fi
-
-wait
+/usr/bin/kazeta > /var/kazeta/session.log 2>&1
 
 POWER_OFF=1
 RESTART_SESSION_SENTINEL=/var/kazeta/state/.RESTART_SESSION_SENTINEL
