@@ -125,9 +125,14 @@ fn search_breadth_first(
     }
 }
 
+/// Kazeta's data directory: $XDG_DATA_HOME/kazeta, falling back to ~/.local/share/kazeta
+pub fn get_kazeta_data_dir() -> PathBuf {
+    dirs::data_dir().unwrap().join("kazeta")
+}
+
 pub fn get_base_dir_from_drive_name(drive_name: &str) -> String {
     if drive_name == "internal" || drive_name.is_empty() {
-        dirs::home_dir().unwrap().join(".local/share/kazeta").to_string_lossy().to_string()
+        get_kazeta_data_dir().to_string_lossy().to_string()
     } else {
         let base_ext = if Path::new("/media").read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
             if Path::new(&format!("/run/media/{}", whoami::username())).exists() {
@@ -165,7 +170,7 @@ pub fn get_save_dir_from_drive_name(drive_name: &str) -> String {
 }
 
 pub fn get_cache_dir_from_drive_name(drive_name: &str) -> String {
-    let base_dir = dirs::home_dir().unwrap().join(".local/share/kazeta");
+    let base_dir = get_kazeta_data_dir();
     if drive_name == "internal" || drive_name.is_empty() {
         let cache_dir = base_dir.join("cache");
         if !cache_dir.exists() {
@@ -214,7 +219,7 @@ pub fn list_devices() -> io::Result<Vec<(String, u32)>> {
     let disks = Disks::new_with_refreshed_list();
 
     // Add internal drive
-    let base_dir = dirs::home_dir().unwrap().join(".local/share/kazeta");
+    let base_dir = get_kazeta_data_dir();
     let base_dir_str = base_dir.to_str().unwrap();
 
     // Find the disk that contains our base directory

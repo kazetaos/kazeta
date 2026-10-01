@@ -8,7 +8,6 @@ use std::panic;
 use futures;
 use std::sync::atomic::{AtomicU16, Ordering, AtomicBool};
 use std::fs;
-use std::path::Path;
 use std::process;
 
 mod save;
@@ -134,7 +133,7 @@ const PLAY_OPTION_INDEX: usize = 2;
 const RESOLUTION_OPTIONS: [(&str, &str); 3] = [("NATIVE", "native"), ("1080P", "1080p"), ("720P", "720p")];
 
 fn resolution_file_path() -> std::path::PathBuf {
-    dirs::home_dir().unwrap().join(".local/share/kazeta/state/.resolution")
+    save::get_kazeta_data_dir().join("state/.resolution")
 }
 
 fn load_resolution_setting() -> usize {
@@ -1548,7 +1547,7 @@ async fn main() {
                             if play_option_enabled {
                                 sound_effects.play_select();
                                 // Create restart session sentinel file and start fade
-                                let state_dir = Path::new(".local/share/kazeta/state");
+                                let state_dir = save::get_kazeta_data_dir().join("state");
                                 if state_dir.exists() {
                                     let sentinel_path = state_dir.join(".RESTART_SESSION_SENTINEL");
                                     if let Err(_) = fs::File::create(&sentinel_path) {

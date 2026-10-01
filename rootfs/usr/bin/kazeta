@@ -2,7 +2,7 @@
 
 set -x
 
-BASE_DIR="$HOME/.local/share/kazeta"
+BASE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kazeta"
 if [[ ! -d "${BASE_DIR}" ]]; then
 	mkdir -p "${BASE_DIR}"
 fi
@@ -140,13 +140,10 @@ runtimedir="${BASE_DIR}/run/runtime"
 pkexec kazeta-mount "${lower}" "${upper}" "${work}" "${target}" "${runtime}" "${runtimedir}"
 trap cleanup EXIT
 
-export HOME="${BASE_DIR}/run/cart"
-export XDG_CONFIG_HOME="${HOME}/.config"
-export XDG_DATA_HOME="${HOME}/.local/share"
-export XDG_CACHE_HOME="${HOME}/.cache"
-export XDG_STATE_HOME="${HOME}/.local/state"
+# home directory for the game, only applied to the game's environment below
+cart_home="${target}"
 
-pushd "${HOME}"
+pushd "${cart_home}"
 
 cart_exec="$(get_attribute 'Exec' ${cart_info})"
 cart_gsopts="$(get_attribute 'GamescopeOptions' ${cart_info})"
@@ -165,4 +162,9 @@ rm -f .kazeta/var/playtime_end
 mkdir -p .kazeta/var
 date --iso-8601=seconds > .kazeta/var/playtime_start
 start_playtime_capture &
-gamescope ${cart_gsopts} -- ./.kazeta/share/run /tmp/kazeta-cart-exec | grep -v "pressure-vessel-wrap" > "${HOME}/.kazeta/var/run.log" 2>&1
+env HOME="${cart_home}" \
+	XDG_CONFIG_HOME="${cart_home}/.config" \
+	XDG_DATA_HOME="${cart_home}/.local/share" \
+	XDG_CACHE_HOME="${cart_home}/.cache" \
+	XDG_STATE_HOME="${cart_home}/.local/state" \
+	gamescope ${cart_gsopts} -- ./.kazeta/share/run /tmp/kazeta-cart-exec | grep -v "pressure-vessel-wrap" > "${cart_home}/.kazeta/var/run.log" 2>&1
