@@ -126,7 +126,30 @@ struct DrawContext {
 enum Screen {
     MainMenu,
     SaveData,
+    Display,
     FadingOut,
+}
+
+const PLAY_OPTION_INDEX: usize = 2;
+const RESOLUTION_OPTIONS: [(&str, &str); 3] = [("NATIVE", "native"), ("1080P", "1080p"), ("720P", "720p")];
+
+fn resolution_file_path() -> std::path::PathBuf {
+    dirs::home_dir().unwrap().join(".local/share/kazeta/state/.resolution")
+}
+
+fn load_resolution_setting() -> usize {
+    let value = fs::read_to_string(resolution_file_path()).unwrap_or_default();
+    RESOLUTION_OPTIONS.iter()
+        .position(|(_, v)| *v == value.trim())
+        .unwrap_or(0)
+}
+
+fn save_resolution_setting(index: usize) {
+    let path = resolution_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, format!("{}\n", RESOLUTION_OPTIONS[index].1));
 }
 
 // UI Focus for Save Data Screen
@@ -1193,7 +1216,7 @@ fn render_main_menu(
             let mut x_pos = (SCREEN_WIDTH as f32 - base_width) / 2.0;
 
             // Apply shake effect to selection highlight for disabled play option
-            if i == 1 && !play_option_enabled {
+            if i == PLAY_OPTION_INDEX && !play_option_enabled {
                 let shake_offset = animation_state.calculate_shake_offset(ShakeTarget::PlayOption);
                 x_pos += shake_offset;
             }
@@ -1207,12 +1230,12 @@ fn render_main_menu(
         let y_pos_text = y_pos + MENU_PADDING;
 
         // Apply shake effect to disabled play option when selected
-        if i == 1 && !play_option_enabled {
+        if i == PLAY_OPTION_INDEX && !play_option_enabled {
             let shake_offset = animation_state.calculate_shake_offset(ShakeTarget::PlayOption);
             x_pos += shake_offset;
         }
 
-        if i == 1 && !play_option_enabled {
+        if i == PLAY_OPTION_INDEX && !play_option_enabled {
             text_disabled(&ctx, option, x_pos, y_pos_text);
         } else {
             text(&ctx, option, x_pos, y_pos_text);
@@ -1222,6 +1245,67 @@ fn render_main_menu(
     // Draw logo and version number
     draw_texture(logo, (SCREEN_WIDTH as f32 - 166.0)/2.0, 30.0, WHITE);
     text(&ctx, "V2026.0", SCREEN_WIDTH as f32 - 90.0, SCREEN_HEIGHT as f32 - 20.0);
+}
+
+fn render_display_menu(
+    ctx: &DrawContext,
+    selected_option: usize,
+    active_option: usize,
+    animation_state: &AnimationState,
+) {
+    const MENU_START_Y: f32 = 120.0;
+    const MENU_OPTION_HEIGHT: f32 = 40.0;
+    const MENU_PADDING: f32 = 16.0;
+    const INDICATOR_SIZE: f32 = 8.0;
+    const INDICATOR_GAP: f32 = 24.0;
+
+    // Draw background
+    draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32, UI_BG_COLOR);
+
+    text(&ctx, "DISPLAY", (SCREEN_WIDTH as f32 - measure_text("DISPLAY", Some(&ctx.font), FONT_SIZE, 1.0).width) / 2.0, 60.0);
+
+    for (i, (label, _)) in RESOLUTION_OPTIONS.iter().enumerate() {
+        let y_pos = MENU_START_Y + (i as f32 * MENU_OPTION_HEIGHT);
+        let text_width = measure_text(label, Some(&ctx.font), FONT_SIZE, 1.0).width;
+        let x_pos = (SCREEN_WIDTH as f32 - text_width) / 2.0;
+
+        // Draw selected option highlight
+        if i == selected_option {
+            let cursor_color = animation_state.get_cursor_color();
+            let cursor_scale = animation_state.get_cursor_scale();
+            let base_width = text_width + (MENU_PADDING * 2.0);
+            let base_height = FONT_SIZE as f32 + (MENU_PADDING * 2.0);
+            let scaled_width = base_width * cursor_scale;
+            let scaled_height = base_height * cursor_scale;
+            let offset_x = (scaled_width - base_width) / 2.0;
+            let offset_y = (scaled_height - base_height) / 2.0;
+            let box_x = (SCREEN_WIDTH as f32 - base_width) / 2.0;
+
+            draw_rectangle_lines(box_x - offset_x, y_pos - 7.0 - offset_y, scaled_width, scaled_height/1.5, 4.0, cursor_color);
+        }
+
+        // Draw a small triangle to the left of the active option
+        if i == active_option {
+            let center_y = y_pos + MENU_PADDING - FONT_SIZE as f32 / 2.0;
+            let tip_x = x_pos - INDICATOR_GAP;
+            let points = [
+                Vec2::new(tip_x - INDICATOR_SIZE, center_y - INDICATOR_SIZE / 2.0),
+                Vec2::new(tip_x - INDICATOR_SIZE, center_y + INDICATOR_SIZE / 2.0),
+                Vec2::new(tip_x, center_y),
+            ];
+            // Shadow offset to match menu text
+            let shadow_offset = Vec2::new(1.0, 1.0);
+            draw_triangle(
+                points[0] + shadow_offset,
+                points[1] + shadow_offset,
+                points[2] + shadow_offset,
+                Color {r:0.0, g:0.0, b:0.0, a:0.9},
+            );
+            draw_triangle(points[0], points[1], points[2], WHITE);
+        }
+
+        text(&ctx, label, x_pos, y_pos + MENU_PADDING);
+    }
 }
 
 #[macroquad::main(window_conf)]
@@ -1251,10 +1335,12 @@ async fn main() {
     let mut animation_state = AnimationState::new();
 
     // Screen state
-    const MAIN_MENU_OPTIONS: [&str; 2] = ["DATA", "PLAY"];
+    const MAIN_MENU_OPTIONS: [&str; 3] = ["DATA", "DISPLAY", "PLAY"];
     let mut current_screen = Screen::MainMenu;
     let mut main_menu_selection: usize = 0;
     let mut play_option_enabled: bool = false;
+    let mut display_menu_selection: usize = 0;
+    let mut active_resolution: usize = load_resolution_setting();
 
     // Fade state
     let mut fade_start_time: Option<f64> = None;
@@ -1454,6 +1540,11 @@ async fn main() {
                             sound_effects.play_select();
                         },
                         1 => {
+                            current_screen = Screen::Display;
+                            display_menu_selection = active_resolution;
+                            sound_effects.play_select();
+                        },
+                        PLAY_OPTION_INDEX => {
                             if play_option_enabled {
                                 sound_effects.play_select();
                                 // Create restart session sentinel file and start fade
@@ -1475,6 +1566,33 @@ async fn main() {
                         },
                         _ => {}
                     }
+                }
+            },
+            Screen::Display => {
+                render_display_menu(&ctx, display_menu_selection, active_resolution, &animation_state);
+
+                if input_state.up {
+                    if display_menu_selection == 0 {
+                        display_menu_selection = RESOLUTION_OPTIONS.len() - 1;
+                    } else {
+                        display_menu_selection -= 1;
+                    }
+                    animation_state.trigger_transition();
+                    sound_effects.play_cursor_move();
+                }
+                if input_state.down {
+                    display_menu_selection = (display_menu_selection + 1) % RESOLUTION_OPTIONS.len();
+                    animation_state.trigger_transition();
+                    sound_effects.play_cursor_move();
+                }
+                if input_state.select {
+                    active_resolution = display_menu_selection;
+                    save_resolution_setting(active_resolution);
+                    sound_effects.play_select();
+                }
+                if input_state.back {
+                    current_screen = Screen::MainMenu;
+                    sound_effects.play_back();
                 }
             },
             Screen::SaveData => {

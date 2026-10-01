@@ -23,6 +23,13 @@ function get_attribute {
 	cat "${info_file}" | grep "^${attribute}=" | head -1 | cut -d= -f2-
 }
 
+# resolution limit selected in the bios display menu
+RESOLUTION_OPTS=""
+case "$(cat "${BASE_DIR}/state/.resolution" 2> /dev/null)" in
+	1080p) RESOLUTION_OPTS="-W 1920 -H 1080" ;;
+	720p) RESOLUTION_OPTS="-W 1280 -H 720" ;;
+esac
+
 function start_playtime_capture {
 	echo "running" > /tmp/kazeta_playtime_capture_state
 	while [ "$(cat /tmp/kazeta_playtime_capture_state)" == "running" ]; do
@@ -76,7 +83,7 @@ fi
 
 if [[ ! -f "${cart_info}" ]] && [[ ! -f "${cart_pkg}" ]]; then
 	# no cart found, start bios/memory management app
-	gamescope --filter pixel -- kazeta-bios
+	gamescope ${RESOLUTION_OPTS} --filter pixel -- kazeta-bios
 	exit 0
 fi
 
@@ -143,6 +150,9 @@ pushd "${HOME}"
 
 cart_exec="$(get_attribute 'Exec' ${cart_info})"
 cart_gsopts="$(get_attribute 'GamescopeOptions' ${cart_info})"
+if [ -z "${cart_gsopts}" ]; then
+	cart_gsopts="${RESOLUTION_OPTS}"
+fi
 echo "$cart_exec" > /tmp/kazeta-cart-exec
 
 # append previously captured playtime to the log
