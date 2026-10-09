@@ -1,5 +1,5 @@
 [package]
-name = "kazeta-bios"
+name = "kazeta"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,3 +13,6 @@ sysinfo = "0.30.5"
 tar = "0.4.40"
 walkdir = "2.4.0"
 chrono = { version = "0.4", features = ["serde"] }
+signal-hook = "0.4"
+libc = "0.2"
+zbus = { version = "5.19", default-features = false, features = ["blocking-api", "async-io"] }

@@ -75,8 +75,8 @@ jobs:
         id: upload_bios
         uses: actions/upload-artifact@v4
         with:
-          name: kazeta-bios
-          path: bios/target/release/kazeta-bios
+          name: kazeta
+          path: bios/target/release/kazeta
 
   build:
     needs:

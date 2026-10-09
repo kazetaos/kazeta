@@ -130,19 +130,24 @@ pub fn get_kazeta_data_dir() -> PathBuf {
     dirs::data_dir().unwrap().join("kazeta")
 }
 
+/// Where external media gets mounted: /media if in use, otherwise /run/media/$USER or /run/media
+pub fn get_external_media_dir() -> String {
+    if Path::new("/media").read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
+        if Path::new(&format!("/run/media/{}", whoami::username())).exists() {
+            format!("/run/media/{}", whoami::username())
+        } else {
+            "/run/media".to_string()
+        }
+    } else {
+        "/media".to_string()
+    }
+}
+
 pub fn get_base_dir_from_drive_name(drive_name: &str) -> String {
     if drive_name == "internal" || drive_name.is_empty() {
         get_kazeta_data_dir().to_string_lossy().to_string()
     } else {
-        let base_ext = if Path::new("/media").read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
-            if Path::new(&format!("/run/media/{}", whoami::username())).exists() {
-                format!("/run/media/{}", whoami::username())
-            } else {
-                "/run/media".to_string()
-            }
-        } else {
-            "/media".to_string()
-        };
+        let base_ext = get_external_media_dir();
 
         Path::new(&base_ext).join(drive_name).to_string_lossy().to_string()
     }
@@ -180,15 +185,7 @@ pub fn get_cache_dir_from_drive_name(drive_name: &str) -> String {
         }
         cache_dir.to_string_lossy().into_owned()
     } else {
-        let base_ext = if Path::new("/media").read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
-            if Path::new(&format!("/run/media/{}", whoami::username())).exists() {
-                format!("/run/media/{}", whoami::username())
-            } else {
-                "/run/media".to_string()
-            }
-        } else {
-            "/media".to_string()
-        };
+        let base_ext = get_external_media_dir();
 
         let cache_dir = Path::new(&base_ext).join(drive_name).join("kazeta/cache");
         if !cache_dir.exists() {
@@ -200,7 +197,7 @@ pub fn get_cache_dir_from_drive_name(drive_name: &str) -> String {
     }
 }
 
-fn get_attribute(info_file: &Path, attribute: &str) -> io::Result<String> {
+pub fn get_attribute(info_file: &Path, attribute: &str) -> io::Result<String> {
     let file = fs::File::open(info_file)?;
     let reader = io::BufReader::new(file);
 
@@ -288,22 +285,6 @@ pub fn is_cart(drive_name: &str) -> bool {
     }
 
     if let Ok(files) = find_files_by_extension(&mount_point, "kzp", 1, true) {
-        if files.len() > 0 {
-            return true;
-        }
-    }
-
-    false
-}
-
-pub fn is_cart_connected() -> bool {
-    if let Ok(files) = find_files_by_extension("/run/media", "kzi", 2, true) {
-        if files.len() > 0 {
-            return true;
-        }
-    }
-
-    if let Ok(files) = find_files_by_extension("/run/media", "kzp", 2, true) {
         if files.len() > 0 {
             return true;
         }

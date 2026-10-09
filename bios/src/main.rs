@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicU16, Ordering, AtomicBool};
 use std::fs;
 use std::process;
 
+mod launcher;
+mod power;
 mod save;
+mod signals;
 
 const SCREEN_WIDTH: i32 = 640;
 const SCREEN_HEIGHT: i32 = 360;
@@ -73,7 +76,7 @@ impl SoundEffects {
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "kazeta-bios".to_owned(),
+        window_title: "kazeta".to_owned(),
         window_resizable: false,
         window_width: SCREEN_WIDTH,
         window_height: SCREEN_HEIGHT,
@@ -123,13 +126,29 @@ struct DrawContext {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
+    Launcher,
+    MenuTransition,
     MainMenu,
     SaveData,
     Display,
+    CartSelect,
     FadingOut,
 }
 
-const PLAY_OPTION_INDEX: usize = 2;
+#[derive(Clone)]
+struct InsertedCart {
+    path: std::path::PathBuf,
+    name: String,
+    // decoded off the main thread, the texture is created when it is first drawn
+    icon: Option<Arc<Image>>,
+}
+
+const LOGO_X: f32 = (SCREEN_WIDTH as f32 - 166.0) / 2.0;
+const LOGO_MENU_Y: f32 = 30.0;
+// the logo moves up first, then the menu text fades in; reversed when leaving the menu
+const LOGO_MOVE_DURATION: f32 = 0.6;
+const MENU_FADE_DURATION: f32 = 0.3;
+const MENU_REVEAL_DURATION: f32 = LOGO_MOVE_DURATION + MENU_FADE_DURATION;
 const RESOLUTION_OPTIONS: [(&str, &str); 3] = [("NATIVE", "native"), ("1080P", "1080p"), ("720P", "720p")];
 
 fn resolution_file_path() -> std::path::PathBuf {
@@ -165,7 +184,6 @@ enum ShakeTarget {
     LeftArrow,
     RightArrow,
     Dialog,
-    PlayOption,
 }
 
 struct AnimationState {
@@ -241,11 +259,6 @@ impl AnimationState {
         self.shake_time = Self::SHAKE_DURATION;
     }
 
-    fn trigger_play_option_shake(&mut self) {
-        self.shake_target = ShakeTarget::PlayOption;
-        self.shake_time = Self::SHAKE_DURATION;
-    }
-
     fn trigger_transition(&mut self) {
         self.cursor_transition_time = Self::CURSOR_TRANSITION_DURATION;
     }
@@ -297,6 +310,7 @@ struct InputState {
     prev: bool,
     cycle: bool,
     back: bool,
+    start: bool,
     analog_was_neutral: bool,
     ui_focus: UIFocus,
 }
@@ -315,9 +329,16 @@ impl InputState {
             prev: false,
             cycle: false,
             back: false,
+            start: false,
             analog_was_neutral: true,
             ui_focus: UIFocus::Grid,
         }
+    }
+
+    /// Whether any button was pressed this frame
+    fn any(&self) -> bool {
+        self.up || self.down || self.left || self.right || self.select
+            || self.next || self.prev || self.cycle || self.back || self.start
     }
 
     fn update_keyboard(&mut self) {
@@ -330,6 +351,7 @@ impl InputState {
         self.prev = is_key_pressed(KeyCode::LeftBracket);
         self.back = is_key_pressed(KeyCode::Backspace);
         self.cycle = is_key_pressed(KeyCode::Tab);
+        self.start = is_key_pressed(KeyCode::Space);
     }
 
     fn update_controller(&mut self, gilrs: &mut Gilrs) {
@@ -352,6 +374,8 @@ impl InputState {
                 gilrs::EventType::ButtonReleased(Button::LeftTrigger, _) => self.prev = false,
                 gilrs::EventType::ButtonPressed(Button::East, _) => self.back = true,
                 gilrs::EventType::ButtonReleased(Button::East, _) => self.back = false,
+                gilrs::EventType::ButtonPressed(Button::Start, _) => self.start = true,
+                gilrs::EventType::ButtonReleased(Button::Start, _) => self.start = false,
                 _ => {}
             }
         }
@@ -494,15 +518,20 @@ async fn load_memories(media: &StorageMedia, cache: &mut HashMap<String, Texture
 }
 
 fn text(ctx : &DrawContext, text : &str, x : f32, y: f32) {
+    text_with_alpha(ctx, text, x, y, 1.0);
+}
+
+fn text_with_alpha(ctx : &DrawContext, text : &str, x : f32, y: f32, alpha: f32) {
     draw_text_ex(&text.to_uppercase(), x+1.0, y+1.0, TextParams {
         font: Some(&ctx.font),
         font_size: FONT_SIZE,
-        color: Color {r:0.0, g:0.0, b:0.0, a:0.9},
+        color: Color {r:0.0, g:0.0, b:0.0, a:0.9 * alpha},
         ..Default::default()
     });
     draw_text_ex(&text.to_uppercase(), x, y, TextParams {
         font: Some(&ctx.font),
         font_size: FONT_SIZE,
+        color: Color { a: alpha, ..WHITE },
         ..Default::default()
     });
 }
@@ -1187,24 +1216,22 @@ fn render_main_menu(
     ctx: &DrawContext,
     menu_options: &[&str],
     selected_option: usize,
-    play_option_enabled: bool,
     animation_state: &AnimationState,
-    logo: &Texture2D,
+    alpha: f32,
 ) {
     const MENU_START_Y: f32 = 120.0;
     const MENU_OPTION_HEIGHT: f32 = 40.0;
     const MENU_PADDING: f32 = 16.0;
 
-    // Draw background
-    draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32, UI_BG_COLOR);
-
+    // the background dimming and the logo are drawn by the caller so they can be animated separately
     // Draw menu options
     for (i, option) in menu_options.iter().enumerate() {
         let y_pos = MENU_START_Y + (i as f32 * MENU_OPTION_HEIGHT);
 
         // Draw selected option highlight
         if i == selected_option {
-            let cursor_color = animation_state.get_cursor_color();
+            let mut cursor_color = animation_state.get_cursor_color();
+            cursor_color.a *= alpha;
             let cursor_scale = animation_state.get_cursor_scale();
             let base_width = measure_text(option, Some(&ctx.font), FONT_SIZE, 1.0).width + (MENU_PADDING * 2.0);
             let base_height = FONT_SIZE as f32 + (MENU_PADDING * 2.0);
@@ -1212,38 +1239,21 @@ fn render_main_menu(
             let scaled_height = base_height * cursor_scale;
             let offset_x = (scaled_width - base_width) / 2.0;
             let offset_y = (scaled_height - base_height) / 2.0;
-            let mut x_pos = (SCREEN_WIDTH as f32 - base_width) / 2.0;
-
-            // Apply shake effect to selection highlight for disabled play option
-            if i == PLAY_OPTION_INDEX && !play_option_enabled {
-                let shake_offset = animation_state.calculate_shake_offset(ShakeTarget::PlayOption);
-                x_pos += shake_offset;
-            }
+            let x_pos = (SCREEN_WIDTH as f32 - base_width) / 2.0;
 
             draw_rectangle_lines(x_pos - offset_x, y_pos - 7.0 - offset_y, scaled_width, scaled_height/1.5, 4.0, cursor_color);
         }
 
         // Draw text
         let text_width = measure_text(option, Some(&ctx.font), FONT_SIZE, 1.0).width;
-        let mut x_pos = (SCREEN_WIDTH as f32 - text_width) / 2.0;
+        let x_pos = (SCREEN_WIDTH as f32 - text_width) / 2.0;
         let y_pos_text = y_pos + MENU_PADDING;
 
-        // Apply shake effect to disabled play option when selected
-        if i == PLAY_OPTION_INDEX && !play_option_enabled {
-            let shake_offset = animation_state.calculate_shake_offset(ShakeTarget::PlayOption);
-            x_pos += shake_offset;
-        }
-
-        if i == PLAY_OPTION_INDEX && !play_option_enabled {
-            text_disabled(&ctx, option, x_pos, y_pos_text);
-        } else {
-            text(&ctx, option, x_pos, y_pos_text);
-        }
+        text_with_alpha(&ctx, option, x_pos, y_pos_text, alpha);
     }
 
-    // Draw logo and version number
-    draw_texture(logo, (SCREEN_WIDTH as f32 - 166.0)/2.0, 30.0, WHITE);
-    text(&ctx, "V2026.0", SCREEN_WIDTH as f32 - 90.0, SCREEN_HEIGHT as f32 - 20.0);
+    // Draw version number
+    text_with_alpha(&ctx, "V2026.0", SCREEN_WIDTH as f32 - 90.0, SCREEN_HEIGHT as f32 - 20.0, alpha);
 }
 
 fn render_display_menu(
@@ -1307,8 +1317,132 @@ fn render_display_menu(
     }
 }
 
-#[macroquad::main(window_conf)]
-async fn main() {
+/// Hand a cart to the launcher, which starts it once the bios exits
+fn hand_over_cart(cart: &std::path::Path) -> bool {
+    let boot_cart_file = launcher::boot_cart_file();
+    match fs::write(&boot_cart_file, cart.to_string_lossy().as_bytes()) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("Failed to write {}: {}", boot_cart_file.display(), e);
+            false
+        }
+    }
+}
+
+/// Shorten `text` with an ellipsis so it fits in `max_width`
+fn fit_text(ctx: &DrawContext, text: &str, max_width: f32) -> String {
+    let text = text.to_uppercase();
+    if measure_text(&text, Some(&ctx.font), FONT_SIZE, 1.0).width <= max_width {
+        return text;
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let shortened = format!("{}...", chars.iter().collect::<String>().trim_end());
+        if measure_text(&shortened, Some(&ctx.font), FONT_SIZE, 1.0).width <= max_width {
+            return shortened;
+        }
+    }
+    String::new()
+}
+
+/// Eased logo movement (0 centered, 1 at the menu position) and menu text alpha
+/// for a menu revealed for `reveal` seconds
+fn menu_reveal_progress(reveal: f32) -> (f32, f32) {
+    let logo_progress = (reveal / LOGO_MOVE_DURATION).min(1.0);
+    let logo_t = logo_progress * logo_progress * (3.0 - 2.0 * logo_progress);
+    let text_alpha = ((reveal - LOGO_MOVE_DURATION) / MENU_FADE_DURATION).clamp(0.0, 1.0);
+    (logo_t, text_alpha)
+}
+
+fn render_cart_select(
+    ctx: &DrawContext,
+    carts: &[InsertedCart],
+    selected_option: usize,
+    cart_icons: &HashMap<std::path::PathBuf, Texture2D>,
+    placeholder: &Texture2D,
+    animation_state: &AnimationState,
+    alpha: f32,
+) {
+    const MENU_START_Y: f32 = 110.0;
+    const MENU_OPTION_HEIGHT: f32 = 44.0;
+    const ICON_SIZE: f32 = 32.0;
+    const ICON_GAP: f32 = 12.0;
+    const CURSOR_PADDING: f32 = 6.0;
+    const VISIBLE_OPTIONS: usize = 5;
+    const SCROLL_INDICATOR_SIZE: f32 = 8.0;
+
+    if alpha <= 0.0 {
+        return;
+    }
+
+    // scroll so the selected option stays visible
+    let first = selected_option.saturating_sub(VISIBLE_OPTIONS - 1).min(carts.len().saturating_sub(VISIBLE_OPTIONS));
+    let max_text_width = SCREEN_WIDTH as f32 - 4.0 * PADDING - ICON_SIZE - ICON_GAP;
+    let labels: Vec<String> = carts.iter().map(|cart| fit_text(ctx, &cart.name, max_text_width)).collect();
+    let text_widths: Vec<f32> = labels.iter().map(|label| measure_text(label, Some(&ctx.font), FONT_SIZE, 1.0).width).collect();
+
+    // the widest entry is centered and the others are left aligned with it, so the icons line up;
+    // all entries count so the column does not shift while scrolling
+    let widest = text_widths.iter().cloned().fold(0.0, f32::max);
+    let x_pos = ((SCREEN_WIDTH as f32 - (ICON_SIZE + ICON_GAP + widest)) / 2.0).round();
+
+    for (row, (i, label)) in labels.iter().enumerate().skip(first).take(VISIBLE_OPTIONS).enumerate() {
+        let cart = &carts[i];
+        let row_y = MENU_START_Y + (row as f32 * MENU_OPTION_HEIGHT);
+        let row_width = ICON_SIZE + ICON_GAP + text_widths[i];
+
+        if i == selected_option {
+            let mut cursor_color = animation_state.get_cursor_color();
+            cursor_color.a *= alpha;
+            let cursor_scale = animation_state.get_cursor_scale();
+            let base_width = row_width + CURSOR_PADDING * 2.0;
+            let base_height = ICON_SIZE + CURSOR_PADDING * 2.0;
+            let scaled_width = base_width * cursor_scale;
+            let scaled_height = base_height * cursor_scale;
+            draw_rectangle_lines(
+                x_pos - CURSOR_PADDING - (scaled_width - base_width) / 2.0,
+                row_y - CURSOR_PADDING - (scaled_height - base_height) / 2.0,
+                scaled_width, scaled_height, 4.0, cursor_color);
+        }
+
+        let icon = cart_icons.get(&cart.path).unwrap_or(placeholder);
+        draw_texture_ex(icon, x_pos, row_y, Color { a: alpha, ..WHITE }, DrawTextureParams {
+            dest_size: Some(Vec2::new(ICON_SIZE, ICON_SIZE)),
+            ..Default::default()
+        });
+
+        // vertically centered on the icon
+        let text_y = row_y + (ICON_SIZE + FONT_SIZE as f32) / 2.0 - 2.0;
+        text_with_alpha(ctx, label, x_pos + ICON_SIZE + ICON_GAP, text_y, alpha);
+    }
+
+    // arrows above and below the list when it scrolls
+    let color = Color { a: alpha, ..WHITE };
+    let center_x = SCREEN_WIDTH as f32 / 2.0;
+    let half = SCROLL_INDICATOR_SIZE / 2.0;
+    if first > 0 {
+        let y = MENU_START_Y - CURSOR_PADDING - 10.0;
+        draw_triangle(Vec2::new(center_x - half, y + half), Vec2::new(center_x + half, y + half), Vec2::new(center_x, y - half), color);
+    }
+    if first + VISIBLE_OPTIONS < carts.len() {
+        let y = MENU_START_Y + VISIBLE_OPTIONS as f32 * MENU_OPTION_HEIGHT + 2.0;
+        draw_triangle(Vec2::new(center_x - half, y - half), Vec2::new(center_x + half, y - half), Vec2::new(center_x, y + half), color);
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        // started by the launcher under gamescope
+        Some(launcher::UI_ARG) => macroquad::Window::from_config(window_conf(), bios_main(args.get(2).map(std::path::PathBuf::from))),
+        // run the given cart, or the bios which waits for one
+        cart => process::exit(launcher::run(cart)),
+    }
+}
+
+/// `ignored_cart` is the cart that was just played; it is not started again until it is removed
+async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
     let mut dialogs: Vec<Dialog> = Vec::new();
     let mut dialog_state = DialogState::None;
     let font = load_ttf_font_from_bytes(include_bytes!("../november.ttf")).unwrap();
@@ -1334,32 +1468,77 @@ async fn main() {
     let mut animation_state = AnimationState::new();
 
     // Screen state
-    const MAIN_MENU_OPTIONS: [&str; 3] = ["DATA", "DISPLAY", "PLAY"];
-    let mut current_screen = Screen::MainMenu;
+    const MAIN_MENU_OPTIONS: [&str; 2] = ["DATA", "DISPLAY"];
+    let mut current_screen = Screen::Launcher;
     let mut main_menu_selection: usize = 0;
-    let mut play_option_enabled: bool = false;
     let mut display_menu_selection: usize = 0;
     let mut active_resolution: usize = load_resolution_setting();
+
+    // Launcher screen state
+    const LOGO_FADE_IN_DURATION: f64 = 0.5;
+    // minimum time the logo is shown at startup before an inserted cart is started
+    const LOGO_MIN_DISPLAY_DURATION: f64 = 3.0;
+    // time on the launcher screen before prompting for a cart, and the prompt's blink period
+    const INSERT_CART_PROMPT_DELAY: f64 = 5.0;
+    const INSERT_CART_BLINK_PERIOD: f64 = 1.0;
+    // after this long without input the logo starts bouncing around the screen
+    const LOGO_BOUNCE_IDLE_DELAY: f64 = 60.0;
+    const LOGO_BOUNCE_SPEED: f32 = 80.0; // pixels per second on each axis
+    let logo_center_y = ((SCREEN_HEIGHT as f32 - logo.height()) / 2.0).round();
+    let mut logo_alpha: f32 = 0.0;
+    // seconds into the transition: 0.0 shows only the centered logo, the end the full main menu
+    let mut menu_reveal: f32 = 0.0;
+    let mut transition_to_menu = false;
 
     // Fade state
     let mut fade_start_time: Option<f64> = None;
     const FADE_DURATION: f64 = 1.0; // 1 second fade
     const FADE_LINGER_DURATION: f64 = 0.5; // 0.5 seconds to linger on black screen
 
-    // Create thread-safe cart connection status
-    let cart_connected = Arc::new(AtomicBool::new(false));
-    let cart_check_thread_running = Arc::new(AtomicBool::new(false));
-
-    // Spawn background thread for cart connection detection (only active during main menu)
-    let cart_connected_clone = cart_connected.clone();
-    let cart_check_thread_running_clone = cart_check_thread_running.clone();
-    thread::spawn(move || {
-        while cart_check_thread_running_clone.load(Ordering::Relaxed) {
-            let is_connected = save::is_cart_connected();
-            cart_connected_clone.store(is_connected, Ordering::Relaxed);
-            thread::sleep(time::Duration::from_secs(1));
-        }
-    });
+    // Watch for carts while the launcher or cart selection screen is shown
+    let inserted_carts: Arc<Mutex<Vec<InsertedCart>>> = Arc::new(Mutex::new(Vec::new()));
+    let cart_watch = Arc::new(AtomicBool::new(true));
+    {
+        let inserted_carts = inserted_carts.clone();
+        let cart_watch = cart_watch.clone();
+        let mut ignored_cart = ignored_cart;
+        let mut known_carts: Vec<InsertedCart> = Vec::new();
+        thread::spawn(move || loop {
+            let mut paths = Vec::new();
+            if cart_watch.load(Ordering::Relaxed) {
+                paths = launcher::find_carts();
+                // the media of the cart that was just played counts as removed until it is actually removed
+                if ignored_cart.as_ref().is_some_and(|ignored| paths.contains(ignored)) {
+                    paths.clear();
+                } else {
+                    ignored_cart = None;
+                }
+            }
+            // only read cart info when the carts change, which may be slow on optical media
+            if paths.len() != known_carts.len() || paths.iter().zip(&known_carts).any(|(path, cart)| *path != cart.path) {
+                known_carts = paths.into_iter()
+                    .map(|path| {
+                        let details = launcher::cart_details(&path);
+                        let icon = details.icon
+                            .and_then(|bytes| Image::from_file_with_format(&bytes, None).ok())
+                            .map(Arc::new);
+                        InsertedCart { name: details.name, icon, path }
+                    })
+                    .collect();
+                if let Ok(mut inserted) = inserted_carts.lock() {
+                    *inserted = known_carts.clone();
+                }
+            }
+            thread::sleep(time::Duration::from_millis(250));
+        });
+    }
+    // cart selection screen state; the list is kept while leaving so it can fade out
+    let mut cart_selection: usize = 0;
+    let mut cart_select_list: Vec<InsertedCart> = Vec::new();
+    let mut cart_select_reveal: f32 = 0.0;
+    let mut cart_select_leaving = false;
+    let mut cart_chosen = false;
+    let mut cart_icons: HashMap<std::path::PathBuf, Texture2D> = HashMap::new();
 
     // Create thread-safe storage media state
     let storage_state = Arc::new(Mutex::new(StorageMediaState::new()));
@@ -1409,9 +1588,19 @@ async fn main() {
 
     const DELTA: f32 = 0.0001;
 
+    let launcher_start_time = get_time();
+    // reset whenever the launcher screen is entered again from the main menu
+    let mut launcher_screen_time = launcher_start_time;
+    let mut last_activity_time = launcher_start_time;
+    // position and velocity of the bouncing logo while idle
+    let mut logo_bounce: Option<(Vec2, Vec2)> = None;
+
     loop {
-        draw_texture(&background, bgx-(SCREEN_WIDTH as f32), 0.0, bg_color);
-        draw_texture(&background, bgx, 0.0, bg_color);
+        clear_background(BLACK);
+        if menu_reveal > 0.0 {
+            draw_texture(&background, bgx-(SCREEN_WIDTH as f32), 0.0, bg_color);
+            draw_texture(&background, bgx, 0.0, bg_color);
+        }
         bgx = (bgx + 0.1) % (SCREEN_WIDTH as f32);
 
         if bg_color.r < tg_color.r {
@@ -1449,26 +1638,7 @@ async fn main() {
         animation_state.update_cursor_animation(get_frame_time());
         animation_state.update_dialog_transition(get_frame_time());
 
-        // Manage cart check thread based on current screen
-        let should_thread_run = current_screen == Screen::MainMenu;
-        let thread_is_running = cart_check_thread_running.load(Ordering::Relaxed);
-
-        if should_thread_run && !thread_is_running {
-            // Entered main menu, start cart check thread
-            cart_check_thread_running.store(true, Ordering::Relaxed);
-            let cart_connected_clone = cart_connected.clone();
-            let cart_check_thread_running_clone = cart_check_thread_running.clone();
-            thread::spawn(move || {
-                while cart_check_thread_running_clone.load(Ordering::Relaxed) {
-                    let is_connected = save::is_cart_connected();
-                    cart_connected_clone.store(is_connected, Ordering::Relaxed);
-                    thread::sleep(time::Duration::from_secs(1));
-                }
-            });
-        } else if !should_thread_run && thread_is_running {
-            // Left main menu, stop cart check thread
-            cart_check_thread_running.store(false, Ordering::Relaxed);
-        }
+        cart_watch.store(matches!(current_screen, Screen::Launcher | Screen::CartSelect), Ordering::Relaxed);
 
         // Update dialog state based on animation
         if animation_state.dialog_transition_time <= 0.0 {
@@ -1486,35 +1656,179 @@ async fn main() {
 
         // Handle screen-specific rendering and input
         match current_screen {
+            Screen::Launcher => {
+                logo_alpha = ((get_time() - launcher_start_time) / LOGO_FADE_IN_DURATION).min(1.0) as f32;
+                let carts = inserted_carts.lock().map(|carts| carts.clone()).unwrap_or_default();
+                let cart_inserted = !carts.is_empty();
+
+                // input or a cart ends the bouncing logo; the press that ends it does nothing else
+                let mut woken = false;
+                if input_state.any() || cart_inserted {
+                    woken = logo_bounce.take().is_some();
+                    last_activity_time = get_time();
+                }
+                if logo_bounce.is_none() && get_time() - last_activity_time >= LOGO_BOUNCE_IDLE_DELAY {
+                    logo_bounce = Some((
+                        Vec2::new(LOGO_X, logo_center_y),
+                        Vec2::new(LOGO_BOUNCE_SPEED, LOGO_BOUNCE_SPEED),
+                    ));
+                }
+
+                if let Some((position, velocity)) = logo_bounce.as_mut() {
+                    *position += *velocity * get_frame_time();
+                    // bounce off the screen edges
+                    let max = Vec2::new(SCREEN_WIDTH as f32 - logo.width(), SCREEN_HEIGHT as f32 - logo.height());
+                    if position.x <= 0.0 {
+                        velocity.x = velocity.x.abs();
+                    } else if position.x >= max.x {
+                        velocity.x = -velocity.x.abs();
+                    }
+                    if position.y <= 0.0 {
+                        velocity.y = velocity.y.abs();
+                    } else if position.y >= max.y {
+                        velocity.y = -velocity.y.abs();
+                    }
+                    *position = position.clamp(Vec2::ZERO, max);
+                    draw_texture(&logo, position.x.round(), position.y.round(), Color { a: logo_alpha, ..WHITE });
+                } else {
+                    draw_texture(&logo, LOGO_X, logo_center_y, Color { a: logo_alpha, ..WHITE });
+                }
+
+                // show the logo for a minimum time at startup before starting an inserted cart
+                let logo_shown_long_enough = get_time() - launcher_start_time >= LOGO_MIN_DISPLAY_DURATION;
+                if logo_shown_long_enough {
+                    if carts.len() == 1 {
+                        if hand_over_cart(&carts[0].path) {
+                            sound_effects.play_select();
+                            fade_start_time = Some(get_time());
+                            current_screen = Screen::FadingOut;
+                        }
+                    } else if carts.len() > 1 {
+                        // several games inserted, let the user pick one
+                        cart_selection = 0;
+                        cart_select_list = carts;
+                        cart_select_reveal = 0.0;
+                        cart_select_leaving = false;
+                        cart_chosen = false;
+                        cart_icons.clear();
+                        current_screen = Screen::CartSelect;
+                    }
+                }
+
+                let launcher_elapsed = get_time() - launcher_screen_time;
+                if !cart_inserted && logo_bounce.is_none() && launcher_elapsed >= INSERT_CART_PROMPT_DELAY {
+                    let blink_time = (launcher_elapsed - INSERT_CART_PROMPT_DELAY) % INSERT_CART_BLINK_PERIOD;
+                    if blink_time < INSERT_CART_BLINK_PERIOD / 2.0 {
+                        let text = "INSERT CART";
+                        let text_width = measure_text(text, Some(&ctx.font), FONT_SIZE, 1.0).width;
+                        let x = ((SCREEN_WIDTH as f32 - text_width) / 2.0).round();
+                        text_with_alpha(&ctx, text, x, logo_center_y + logo.height() + 40.0, 1.0);
+                    }
+                }
+
+                if !cart_inserted && !woken && (input_state.select || input_state.start) {
+                    sound_effects.play_select();
+                    transition_to_menu = true;
+                    current_screen = Screen::MenuTransition;
+                }
+            },
+            Screen::MenuTransition => {
+                let step = get_frame_time();
+                menu_reveal = if transition_to_menu { (menu_reveal + step).min(MENU_REVEAL_DURATION) } else { (menu_reveal - step).max(0.0) };
+                let (logo_t, text_alpha) = menu_reveal_progress(menu_reveal);
+
+                // black fading to the usual dimmed background
+                draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32,
+                    Color { a: 1.0 - logo_t * (1.0 - UI_BG_COLOR.a), ..UI_BG_COLOR });
+                render_main_menu(&ctx, &MAIN_MENU_OPTIONS, main_menu_selection, &animation_state, text_alpha);
+                let logo_y = logo_center_y + (LOGO_MENU_Y - logo_center_y) * logo_t;
+                draw_texture(&logo, LOGO_X, logo_y, Color { a: logo_alpha, ..WHITE });
+
+                if transition_to_menu && menu_reveal >= MENU_REVEAL_DURATION {
+                    current_screen = Screen::MainMenu;
+                } else if !transition_to_menu && menu_reveal <= 0.0 {
+                    current_screen = Screen::Launcher;
+                    launcher_screen_time = get_time();
+                    last_activity_time = launcher_screen_time;
+                }
+            },
+            Screen::CartSelect => {
+                if !cart_select_leaving {
+                    let carts = inserted_carts.lock().map(|carts| carts.clone()).unwrap_or_default();
+                    if carts.is_empty() {
+                        // the carts were removed, go back to the logo
+                        cart_select_leaving = true;
+                    } else {
+                        cart_select_list = carts;
+                    }
+                }
+
+                let step = get_frame_time();
+                cart_select_reveal = if cart_select_leaving {
+                    (cart_select_reveal - step).max(0.0)
+                } else {
+                    (cart_select_reveal + step).min(MENU_REVEAL_DURATION)
+                };
+                let (logo_t, text_alpha) = menu_reveal_progress(cart_select_reveal);
+
+                cart_selection = cart_selection.min(cart_select_list.len().saturating_sub(1));
+                for cart in &cart_select_list {
+                    if let (Some(icon), false) = (&cart.icon, cart_icons.contains_key(&cart.path)) {
+                        cart_icons.insert(cart.path.clone(), Texture2D::from_image(icon));
+                    }
+                }
+                render_cart_select(&ctx, &cart_select_list, cart_selection, &cart_icons, &placeholder, &animation_state, text_alpha);
+                let logo_y = logo_center_y + (LOGO_MENU_Y - logo_center_y) * logo_t;
+                draw_texture(&logo, LOGO_X, logo_y, Color { a: logo_alpha, ..WHITE });
+
+                if cart_select_leaving {
+                    if cart_select_reveal <= 0.0 {
+                        if cart_chosen {
+                            fade_start_time = Some(get_time());
+                            current_screen = Screen::FadingOut;
+                        } else {
+                            current_screen = Screen::Launcher;
+                            launcher_screen_time = get_time();
+                            last_activity_time = launcher_screen_time;
+                        }
+                    }
+                } else if cart_select_reveal >= MENU_REVEAL_DURATION {
+                    let count = cart_select_list.len();
+                    // the selection stops at the ends of the list
+                    if input_state.up && cart_selection > 0 {
+                        cart_selection -= 1;
+                        animation_state.trigger_transition();
+                        sound_effects.play_cursor_move();
+                    }
+                    if input_state.down && cart_selection + 1 < count {
+                        cart_selection += 1;
+                        animation_state.trigger_transition();
+                        sound_effects.play_cursor_move();
+                    }
+                    if (input_state.select || input_state.start) && hand_over_cart(&cart_select_list[cart_selection].path) {
+                        sound_effects.play_select();
+                        cart_select_leaving = true;
+                        cart_chosen = true;
+                    }
+                }
+            },
             Screen::FadingOut => {
                 // During fade, only render, don't process input
-                // Render the current background and UI elements first
-                render_main_menu(&ctx, &MAIN_MENU_OPTIONS, main_menu_selection, play_option_enabled, &animation_state, &logo);
-
-                // Calculate fade progress
                 if let Some(start_time) = fade_start_time {
                     let elapsed = get_time() - start_time;
-                    let fade_progress = (elapsed / FADE_DURATION).min(1.0);
-
-                    // Draw fade overlay
-                    let alpha = fade_progress as f32;
-                    draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32,
-                        Color { r: 0.0, g: 0.0, b: 0.0, a: alpha });
+                    let fade_progress = (elapsed / FADE_DURATION).min(1.0) as f32;
+                    draw_texture(&logo, LOGO_X, logo_center_y, Color { a: logo_alpha * (1.0 - fade_progress), ..WHITE });
 
                     // If fade is complete, wait for linger duration then exit
-                    if fade_progress >= 1.0 {
-                        let total_elapsed = elapsed - FADE_DURATION;
-                        if total_elapsed >= FADE_LINGER_DURATION {
-                            process::exit(0);
-                        }
+                    if fade_progress >= 1.0 && elapsed - FADE_DURATION >= FADE_LINGER_DURATION {
+                        process::exit(0);
                     }
                 }
             },
             Screen::MainMenu => {
-                // Update play option enabled status based on cart connection
-                play_option_enabled = cart_connected.load(Ordering::Relaxed);
-
-                render_main_menu(&ctx, &MAIN_MENU_OPTIONS, main_menu_selection, play_option_enabled, &animation_state, &logo);
+                draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32, UI_BG_COLOR);
+                render_main_menu(&ctx, &MAIN_MENU_OPTIONS, main_menu_selection, &animation_state, 1.0);
+                draw_texture(&logo, LOGO_X, LOGO_MENU_Y, WHITE);
 
                 // Handle main menu navigation
                 if input_state.up {
@@ -1543,28 +1857,12 @@ async fn main() {
                             display_menu_selection = active_resolution;
                             sound_effects.play_select();
                         },
-                        PLAY_OPTION_INDEX => {
-                            if play_option_enabled {
-                                sound_effects.play_select();
-                                // Create restart session sentinel file and start fade
-                                let state_dir = save::get_kazeta_data_dir().join("state");
-                                if state_dir.exists() {
-                                    let sentinel_path = state_dir.join(".RESTART_SESSION_SENTINEL");
-                                    if let Err(_) = fs::File::create(&sentinel_path) {
-                                        // If we can't create the file, just continue
-                                        // Don't show error to user
-                                    }
-                                }
-                                // Start fade to black
-                                fade_start_time = Some(get_time());
-                                current_screen = Screen::FadingOut;
-                            } else {
-                                sound_effects.play_reject();
-                                animation_state.trigger_play_option_shake();
-                            }
-                        },
                         _ => {}
                     }
+                } else if input_state.back {
+                    sound_effects.play_back();
+                    transition_to_menu = false;
+                    current_screen = Screen::MenuTransition;
                 }
             },
             Screen::Display => {

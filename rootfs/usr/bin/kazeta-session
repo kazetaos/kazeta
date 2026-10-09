@@ -1,40 +1,45 @@
 #! /bin/bash
+# Session started by greetd: prepares devices, runs kazeta and powers off when it exits
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kazeta"
 
 # ensure inputplumber manages all controllers
 for i in $(seq 1 20); do
-        inputplumber devices manage-all --enable > /dev/null
-
-        if [ "$?" == "0" ]; then
-                break
-        fi
-
-        sleep 0.1
+	inputplumber devices manage-all --enable > /dev/null 2>&1 && break
+	sleep 0.1
 done
 
 # wait for inputplumber devices to appear
 for i in $(seq 1 20); do
-    count=$(busctl tree org.shadowblip.InputPlumber 2>/dev/null | grep -c CompositeDevice)
-    [ "$count" -gt 0 ] && break
-    sleep 0.1
+	busctl tree org.shadowblip.InputPlumber 2>/dev/null | grep -q CompositeDevice && break
+	sleep 0.1
 done
 
 # remember audio settings
-mkdir -p /var/kazeta/state/wireplumber
+mkdir -p "$data_dir/state/wireplumber"
 
 # hack to fix bios app audio
-wpctl status > /dev/null
+wpctl status > /dev/null 2>&1
+
+# when the session is stopped from outside, let kazeta stop the game and unmount the cart,
+# and leave power management to whoever stopped the session
+terminated=0
+trap 'terminated=1; kill -TERM $pid 2>/dev/null' TERM INT HUP
+
+# let kazeta handle the power button (see logind.conf.d/10-kazeta.conf)
+export KAZETA_HANDLE_POWER_KEY=1
 
 # start session
-mv /var/kazeta/session.log /var/kazeta/session.log.old
-/usr/bin/kazeta > /var/kazeta/session.log 2>&1
+mv -f "$data_dir/session.log" "$data_dir/session.log.old" 2>/dev/null
+/usr/bin/kazeta > "$data_dir/session.log" 2>&1 &
+pid=$!
 
-POWER_OFF=1
-RESTART_SESSION_SENTINEL=/var/kazeta/state/.RESTART_SESSION_SENTINEL
-if [ -f $RESTART_SESSION_SENTINEL ]; then
-	rm -f $RESTART_SESSION_SENTINEL
-	POWER_OFF=0
-fi
+# a trapped signal interrupts wait, so keep waiting until kazeta has actually exited
+wait $pid
+while kill -0 $pid 2>/dev/null; do
+	wait $pid
+done
 
-if [ "$POWER_OFF" == "1" ]; then
+if [ "$terminated" == "0" ]; then
 	poweroff
 fi

@@ -1,6 +1,14 @@
 [terminal]
 vt = 1
 
-[default_session]
+# initial session is a regular user session that can receive lock signals
+# the system uses lock signals to communicate power button presses
+[initial_session]
 command = "/usr/bin/kazeta-session"
+user = "gamer"
+
+# default session is a greeter session which cannot receive lock signals
+# it is a fallback session if the initial session crashes or exits, power off in that case for now
+[default_session]
+command = "/usr/bin/poweroff"
 user = "gamer"

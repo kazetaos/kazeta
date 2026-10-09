@@ -48,11 +48,11 @@ jobs:
         id: download_bios
         uses: actions/download-artifact@v4
         with:
-          name: kazeta-bios
+          name: kazeta
           path: rootfs/usr/bin/
       - name: Set executable permissions on bios app binary
         id: bios_permissions
-        run: chmod +x rootfs/usr/bin/kazeta-bios
+        run: chmod +x rootfs/usr/bin/kazeta
       - name: Build system image
         id: build_image
         run: |
