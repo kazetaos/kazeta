@@ -29,6 +29,9 @@ trap 'terminated=1; kill -TERM $pid 2>/dev/null' TERM INT HUP
 # let kazeta handle the power button (see logind.conf.d/10-kazeta.conf)
 export KAZETA_HANDLE_POWER_KEY=1
 
+# let kazeta handle the volume keys (desktop sessions leave this unset)
+export KAZETA_HANDLE_VOLUME_KEYS=1
+
 # start session
 mv -f "$data_dir/session.log" "$data_dir/session.log.old" 2>/dev/null
 /usr/bin/kazeta > "$data_dir/session.log" 2>&1 &

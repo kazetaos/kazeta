@@ -17,6 +17,7 @@ use chrono::{Local, SecondsFormat};
 use crate::save;
 use crate::power;
 use crate::signals;
+use crate::volume;
 
 const NONE_RUNTIME: &str = "/usr/share/kazeta/runtimes/none.kzr";
 /// Argument the launcher starts the bios UI with under gamescope
@@ -278,6 +279,7 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
         return run_cart(cart, &base_dir, &|| terminated.get());
     }
 
+    volume::watch();
     let power_key = power::watch();
     let stop = || terminated.get() || power_key.pressed();
     // the cart that was just played, so the bios does not start it again right away

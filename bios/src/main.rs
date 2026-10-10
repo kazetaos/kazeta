@@ -14,6 +14,7 @@ mod launcher;
 mod power;
 mod save;
 mod signals;
+mod volume;
 
 const SCREEN_WIDTH: i32 = 640;
 const SCREEN_HEIGHT: i32 = 360;
