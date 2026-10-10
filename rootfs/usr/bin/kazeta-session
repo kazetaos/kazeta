@@ -34,7 +34,10 @@ export KAZETA_HANDLE_VOLUME_KEYS=1
 
 # start session
 mv -f "$data_dir/session.log" "$data_dir/session.log.old" 2>/dev/null
-/usr/bin/kazeta > "$data_dir/session.log" 2>&1 &
+# a custom build in the data dir takes precedence over the system one
+kazeta_bin=/usr/bin/kazeta
+[ -x "$data_dir/bin/kazeta" ] && kazeta_bin="$data_dir/bin/kazeta"
+"$kazeta_bin" > "$data_dir/session.log" 2>&1 &
 pid=$!
 
 # a trapped signal interrupts wait, so keep waiting until kazeta has actually exited
