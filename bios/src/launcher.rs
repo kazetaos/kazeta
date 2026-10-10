@@ -55,6 +55,16 @@ fn resolution_gamescope_args() -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
 }
 
+/// Gamescope options for the display orientation in the state directory's .orientation file
+/// (normal, left, right or upsidedown); empty if the file is missing or empty
+fn orientation_gamescope_args() -> Vec<String> {
+    let path = save::get_kazeta_data_dir().join("state/.orientation");
+    match fs::read_to_string(path) {
+        Ok(value) if !value.trim().is_empty() => vec!["--force-orientation".to_string(), value.trim().to_string()],
+        _ => Vec::new(),
+    }
+}
+
 /// Find the first file with the given extension in `dir` or its immediate subdirectories
 fn find_cart_file(dir: &Path, extension: &str) -> Option<PathBuf> {
     save::find_files_by_extension(dir, extension, 1, true)
@@ -147,6 +157,7 @@ fn run_bios(resolution_args: &[String], ignored_cart: Option<&Path>, stop: &dyn 
     eprintln!("+ gamescope {:?} --filter pixel -- {} {} {:?}", resolution_args, exe.display(), UI_ARG, ignored_cart);
     let child = Command::new("gamescope")
         .args(resolution_args)
+        .args(orientation_gamescope_args())
         .args(["--filter", "pixel", "--"])
         .arg(exe)
         .arg(UI_ARG)
@@ -416,6 +427,7 @@ fn run_game(cart_home: &Path, cart_gsopts: &[String], cart_exec_file: &Path, sto
     eprintln!("+ gamescope {:?} -- ./.kazeta/share/run {}", cart_gsopts, cart_exec_file.display());
     let child = Command::new("gamescope")
         .args(cart_gsopts)
+        .args(orientation_gamescope_args())
         .arg("--")
         .arg("./.kazeta/share/run")
         .arg(cart_exec_file)
