@@ -26,6 +26,7 @@ export PACKAGES="\
 	lib32-vulkan-intel \
 	lib32-vulkan-radeon \
 	linux-firmware \
+	lsb-release \
 	nvidia-open \
 	nvidia-utils \
 	pipewire-jack \
