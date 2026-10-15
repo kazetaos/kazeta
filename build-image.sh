@@ -146,7 +146,8 @@ passwd --lock root
 
 # create user
 groupadd -r autologin
-useradd -m ${USERNAME} -G autologin,wheel
+# input allows reading volume keys straight from the input devices
+useradd -m ${USERNAME} -G autologin,wheel,input
 echo "${USERNAME}:${USERNAME}" | chpasswd
 
 # set the default editor, so visudo works

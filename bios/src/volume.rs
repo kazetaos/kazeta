@@ -31,6 +31,7 @@ pub fn watch() {
                     continue;
                 }
                 watched.push(path.clone());
+                eprintln!("Watching volume keys on {} ({})", path, device.name().unwrap_or("unknown"));
                 thread::spawn(move || {
                     if let Err(e) = handle_device(device) {
                         eprintln!("Stopped watching volume keys on {}: {}", path, e);
