@@ -1,7 +1,9 @@
 // Standard volume key handling for the Kazeta OS session.
 // Reads volume keys straight from the input devices so they work while a game has focus,
-// and adjusts the default audio sink through wpctl. There is no UI.
+// and adjusts the default audio sink through wpctl. There is no UI beyond a sound effect played with pw-play.
 
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -15,11 +17,20 @@ const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 const STEP: &str = "5%";
 const MAX_VOLUME: &str = "1.0";
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
+const SOUND: &[u8] = include_bytes!("../move.wav");
+
+/// pw-play needs a file, so the embedded sound is written out to the runtime directory
+fn sound_file() -> PathBuf {
+    crate::launcher::runtime_dir().join("kazeta-volume.wav")
+}
 
 /// Start handling volume keys if enabled for this session
 pub fn watch() {
     if !std::env::var_os(ENABLE_ENV).is_some_and(|v| v == "1") {
         return;
+    }
+    if let Err(e) = fs::write(sound_file(), SOUND) {
+        eprintln!("Failed to write volume sound to {}: {}", sound_file().display(), e);
     }
     thread::spawn(|| {
         let mut watched: Vec<String> = Vec::new();
@@ -61,8 +72,10 @@ fn handle_device(mut device: Device) -> std::io::Result<()> {
                 Key::KEY_VOLUMEUP => wpctl(&["set-volume", "-l", MAX_VOLUME, SINK, &format!("{}+", STEP)]),
                 Key::KEY_VOLUMEDOWN => wpctl(&["set-volume", SINK, &format!("{}-", STEP)]),
                 Key::KEY_MUTE if event.value() == 1 => wpctl(&["set-mute", SINK, "toggle"]),
-                _ => {}
+                _ => continue,
             }
+            // played after the change so it is heard at the new volume
+            play_sound();
         }
     }
 }
@@ -71,4 +84,13 @@ fn wpctl(args: &[&str]) {
     if let Err(e) = Command::new("wpctl").args(args).status() {
         eprintln!("Failed to run wpctl: {}", e);
     }
+}
+
+/// Play the volume sound without waiting for it to finish, so holding a key keeps adjusting
+fn play_sound() {
+    thread::spawn(|| {
+        if let Err(e) = Command::new("pw-play").arg(sound_file()).status() {
+            eprintln!("Failed to run pw-play: {}", e);
+        }
+    });
 }
