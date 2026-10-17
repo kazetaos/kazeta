@@ -17,7 +17,8 @@ const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 const STEP: &str = "5%";
 const MAX_VOLUME: &str = "1.0";
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
-const SOUND: &[u8] = include_bytes!("../move.wav");
+/// the bios move sound converted to 48 kHz, the PipeWire graph rate, since resampling at play time distorts its end
+const SOUND: &[u8] = include_bytes!("../volume.wav");
 
 /// pw-play needs a file, so the embedded sound is written out to the runtime directory
 fn sound_file() -> PathBuf {
