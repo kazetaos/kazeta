@@ -6,11 +6,13 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Local, SecondsFormat};
 
@@ -25,6 +27,10 @@ pub const UI_ARG: &str = "--ui";
 const PLAYTIME_INTERVAL: Duration = Duration::from_secs(60);
 /// How long gamescope gets to exit after a termination signal before it is killed
 const GAMESCOPE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
+/// CDEmu device used for cart ISO images
+const CDEMU_DEVICE: &str = "0";
+/// How long to wait for a virtual disc to be mounted before giving up
+const CDEMU_MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Per-user directory for files handed between processes, so multiple users or instances do not collide
 pub fn runtime_dir() -> PathBuf {
@@ -151,6 +157,26 @@ fn pkexec_mount(args: &[&Path]) {
     }
 }
 
+/// Run the cdemu client against the user session bus; the daemon is D-Bus activated on demand
+fn run_cdemu(args: &[&str]) -> bool {
+    let mut command = Command::new("cdemu");
+    command.args(args);
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        command.env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}/bus", PathBuf::from(runtime_dir).display()));
+    }
+    match command.status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            eprintln!("cdemu {} failed: {}", args.join(" "), status);
+            false
+        }
+        Err(e) => {
+            eprintln!("Failed to run cdemu: {}", e);
+            false
+        }
+    }
+}
+
 /// Run the bios UI; `ignored_cart` is not started by it until it has been removed
 fn run_bios(resolution_args: &[String], ignored_cart: Option<&Path>, stop: &dyn Fn() -> bool) -> i32 {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kazeta"));
@@ -246,10 +272,19 @@ struct CartCleanup {
     mounted: Option<(PathBuf, PathBuf)>,
     upper: Option<PathBuf>,
     cart_home: Option<PathBuf>,
+    // drive letter links created for the virtual disc, removed again on exit
+    disc_links: Vec<PathBuf>,
+    // CDEmu device index to unload; kept last so the disc is unloaded after the unmounts
+    cdemu: Option<String>,
 }
 
 impl Drop for CartCleanup {
     fn drop(&mut self) {
+        // remove the disc drive links while the overlay is still mounted; after the unmounts
+        // the paths no longer exist and the links would be left behind in the save data
+        for link in &self.disc_links {
+            let _ = fs::remove_file(link);
+        }
         if let Some(cart_home) = &self.cart_home {
             let _ = fs::remove_file(cart_home.join(".local/share/gvfs-metadata"));
         }
@@ -264,7 +299,88 @@ impl Drop for CartCleanup {
             // only removed if empty
             let _ = fs::remove_dir(upper.join(".kazeta"));
         }
+        if let Some(device) = &self.cdemu {
+            pkexec_mount(&[Path::new("cdemu"), Path::new("unmount"), Path::new(device)]);
+            run_cdemu(&["unload", device]);
+        }
     }
+}
+
+/// Block until the CDEmu virtual disc drive `/dev/sr<device>` has been mounted
+fn wait_for_disc_mounted(device: &str, stop: &dyn Fn() -> bool) -> bool {    let source = format!("/dev/sr{}", device);
+    let deadline = Instant::now() + CDEMU_MOUNT_TIMEOUT;
+    while Instant::now() < deadline {
+        if stop() {
+            return false;
+        }
+        let mounted = Command::new("findmnt")
+            .args(["-rno", "SOURCE", &source])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if mounted {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// Link the mounted disc into the Wine prefix as a drive letter, so the game can find it;
+/// the prefix only exposes its own drive and the filesystem root, not the disc itself.
+/// Returns all created links for cleanup.
+fn link_disc_drive(cart_home: &Path, device: &str) -> Vec<PathBuf> {
+    let mut links = Vec::new();
+    let output = match Command::new("findmnt")
+        .args(["-rno", "TARGET", &format!("/dev/sr{}", device)])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return links,
+    };
+    let mountpoint = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if mountpoint.is_empty() {
+        return links;
+    }
+    let dosdevices = cart_home.join(".kazeta/var/prefix/dosdevices");
+    let _ = fs::create_dir_all(&dosdevices);
+
+    // remove stale disc links from an earlier run of this cart
+    for entry in fs::read_dir(&dosdevices).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if let Ok(target) = fs::read_link(&path) {
+            let target = target.as_os_str().to_string_lossy();
+            if target.starts_with("/run/media/sr") || target.starts_with("/dev/sr") {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    // the prefix itself is c: and the container root is z:; offer the disc as the first free letter
+    let Some(letter) = (b'd'..=b'z')
+        .map(|byte| byte as char)
+        .find(|letter| !dosdevices.join(format!("{}:", letter)).exists())
+    else {
+        eprintln!("No free drive letter for the disc");
+        return links;
+    };
+    let link = dosdevices.join(format!("{}:", letter));
+    if let Err(e) = symlink(&mountpoint, &link) {
+        eprintln!("Failed to link disc at {}: {}", mountpoint, e);
+        return links;
+    }
+    links.push(link);
+    // a second link to the device node makes Wine see the drive as a CD-ROM (DRIVE_CDROM);
+    // games skip fixed drives when looking for the disc
+    let device_link = dosdevices.join(format!("{}::", letter));
+    if let Err(e) = symlink(format!("/dev/sr{}", device), &device_link) {
+        eprintln!("Failed to link disc device {}: {}", device_link.display(), e);
+    } else {
+        links.push(device_link);
+    }
+    eprintln!("Linked disc at {} as {}", mountpoint, links[0].display());
+    links
 }
 
 pub fn run(cart_arg: Option<&str>) -> i32 {
@@ -334,7 +450,8 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     }
     let is_pkg = cart.extension().is_some_and(|ext| ext == "kzp");
 
-    let mut cleanup = CartCleanup { pkg_mount: None, mounted: None, upper: None, cart_home: None };
+    let mut cleanup =
+        CartCleanup { pkg_mount: None, mounted: None, upper: None, cart_home: None, disc_links: Vec::new(), cdemu: None };
 
     let (cart_info, cart_path, media_path) = if is_pkg {
         let cart_pkg = cart;
@@ -357,6 +474,25 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     let attr = |name: &str| save::get_attribute(&cart_info, name).unwrap_or_default();
     let cart_id = attr("Id");
     cache_cart_info(&cart_info, &cart_path);
+
+    // a cart can request a disc image to be available in a virtual drive while it runs
+    let iso = attr("ISO").trim().to_string();
+    if !iso.is_empty() {
+        let iso_path = if Path::new(&iso).is_absolute() { PathBuf::from(&iso) } else { media_path.join(&iso) };
+        eprintln!("+ cdemu load {} {:?}", CDEMU_DEVICE, iso_path);
+        if !run_cdemu(&["load", CDEMU_DEVICE, &iso_path.to_string_lossy()]) {
+            drop(cleanup);
+            return 1;
+        }
+        cleanup.cdemu = Some(CDEMU_DEVICE.to_string());
+        // mount the virtual disc (needs root) and wait for it before starting the game
+        pkexec_mount(&[Path::new("cdemu"), Path::new("mount"), Path::new(CDEMU_DEVICE)]);
+        if !wait_for_disc_mounted(CDEMU_DEVICE, stop) {
+            eprintln!("Disc image {} was not mounted in time, not starting the cart", iso_path.display());
+            drop(cleanup);
+            return 1;
+        }
+    }
 
     let lower = cart_path.clone();
     let upper = base_dir.join("saves/default").join(&cart_id);
@@ -382,6 +518,11 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     // home directory for the game, only applied to the game's environment below
     let cart_home = target.clone();
     cleanup.cart_home = Some(cart_home.clone());
+
+    // the game can only see the disc as a drive letter once the overlay is in place
+    if cleanup.cdemu.is_some() {
+        cleanup.disc_links.extend(link_disc_drive(&cart_home, CDEMU_DEVICE));
+    }
 
     let cart_exec = attr("Exec");
     let cart_gsopts: Vec<String> = match attr("GamescopeOptions") {
@@ -438,6 +579,7 @@ fn run_game(cart_home: &Path, cart_gsopts: &[String], cart_exec_file: &Path, sto
         .env("XDG_CACHE_HOME", cart_home.join(".cache"))
         .env("XDG_STATE_HOME", cart_home.join(".local/state"))
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn();
 
     let mut child = match child {
@@ -450,24 +592,47 @@ fn run_game(cart_home: &Path, cart_gsopts: &[String], cart_exec_file: &Path, sto
 
     // game output goes to the cart's run log, minus pressure-vessel noise
     let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     let log_path = cart_home.join(".kazeta/var/run.log");
-    let log_writer = stdout.map(|stdout| thread::spawn(move || {
-        let mut log = fs::File::create(&log_path)
+    let log_writer = stdout.map(|stdout| {
+        let mut log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
             .map_err(|e| eprintln!("Failed to create {}: {}", log_path.display(), e))
             .ok();
-        // keep reading even without a log so the game never sees a closed pipe
-        for line in BufReader::new(stdout).lines().map_while(io::Result::ok) {
-            if let Some(log) = log.as_mut() {
-                if !line.contains("pressure-vessel-wrap") {
-                    let _ = writeln!(log, "{}", line);
+        // stderr (wine and umu log there) is read on a second thread; append mode keeps
+        // writes from both threads at the end of the log
+        let mut log_for_stderr = log.as_ref().and_then(|_| {
+            fs::OpenOptions::new().append(true).open(&log_path).map_err(|e| eprintln!("Failed to open {}: {}", log_path.display(), e)).ok()
+        });
+        let stderr_writer = stderr.map(|stderr|
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(io::Result::ok) {
+                    if let Some(mut log) = log_for_stderr.as_mut() {
+                        let _ = writeln!(log, "{}", line);
+                    }
+                }
+            })
+        );
+        (thread::spawn(move || {
+            // keep reading even without a log so the game never sees a closed pipe
+            for line in BufReader::new(stdout).lines().map_while(io::Result::ok) {
+                if let Some(log) = log.as_mut() {
+                    if !line.contains("pressure-vessel-wrap") {
+                        let _ = writeln!(log, "{}", line);
+                    }
                 }
             }
-        }
-    }));
+        }), stderr_writer)
+    });
 
     let status = signals::wait_child(&mut child, stop, GAMESCOPE_KILL_TIMEOUT);
-    if let Some(log_writer) = log_writer {
+    if let Some((log_writer, stderr_writer)) = log_writer {
         let _ = log_writer.join();
+        if let Some(stderr_writer) = stderr_writer {
+            let _ = stderr_writer.join();
+        }
     }
 
     match status {

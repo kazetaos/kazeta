@@ -42,10 +42,13 @@ export PACKAGES="\
 "
 
 export AUR_PACKAGES="\
+	cdemu-client \
+	cdemu-daemon \
 	downgrade \
 	frzr \
 	pikaur \
 	udev-media-automount \
+	vhba-module-dkms \
 "
 
 export SERVICES="\

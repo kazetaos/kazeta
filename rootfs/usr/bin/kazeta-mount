@@ -5,6 +5,33 @@ if [ $EUID -ne 0 ]; then
         exit 1
 fi
 
+if [ "$1" == "cdemu" ]; then
+	# mount/unmount a CDEmu virtual disc for games that need the original CD;
+	# loading the image itself is done from the user session (the daemon is user D-Bus activated)
+	action=$2
+	device=$3
+	srdev="/dev/sr$device"
+	if [ "$action" == "mount" ] || [ "$action" == "unmount" ]; then
+		# wait for the virtual drive node to appear
+		for i in $(seq 1 60); do
+			[ -b "$srdev" ] && break
+			sleep 0.5
+		done
+		if [ "$action" == "unmount" ]; then
+			umount "$srdev" &> /dev/null
+			rmdir "/run/media/sr$device" 2> /dev/null
+		elif [ -b "$srdev" ]; then
+			# already mounted by the optical media automount, otherwise mount it ourselves
+			if ! findmnt -rno SOURCE "$srdev" &> /dev/null; then
+				mountpoint="/run/media/sr$device"
+				mkdir -p "$mountpoint"
+				mount "$srdev" "$mountpoint"
+			fi
+		fi
+	fi
+	exit 0
+fi
+
 if [ "$1" == "kzp" ]; then
 	mountpath=$3
 	if [ "$2" == "--unmount" ]; then
