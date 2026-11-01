@@ -384,6 +384,8 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     cleanup.cart_home = Some(cart_home.clone());
 
     let cart_exec = attr("Exec");
+    // directory Exec runs from, relative to the cart root; the runtime changes to it
+    let cart_path_dir = attr("Path");
     let cart_gsopts: Vec<String> = match attr("GamescopeOptions") {
         opts if opts.is_empty() => resolution_gamescope_args(),
         opts => opts.split_whitespace().map(String::from).collect(),
@@ -415,7 +417,7 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     let playtime = PlaytimeCapture::start(playtime_end);
 
     // skip the game if we were asked to stop while mounting; cleanup still runs
-    let status = if stop() { 1 } else { run_game(&cart_home, &cart_gsopts, &cart_exec_file, stop) };
+    let status = if stop() { 1 } else { run_game(&cart_home, &cart_gsopts, &cart_exec_file, &cart_path_dir, stop) };
 
     playtime.stop();
     drop(cleanup);
@@ -423,14 +425,17 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     status
 }
 
-fn run_game(cart_home: &Path, cart_gsopts: &[String], cart_exec_file: &Path, stop: &dyn Fn() -> bool) -> i32 {
-    eprintln!("+ gamescope {:?} -- ./.kazeta/share/run {}", cart_gsopts, cart_exec_file.display());
+fn run_game(cart_home: &Path, cart_gsopts: &[String], cart_exec_file: &Path, cart_path_dir: &str, stop: &dyn Fn() -> bool) -> i32 {
+    eprintln!("+ gamescope {:?} -- ./.kazeta/share/run {} {}", cart_gsopts, cart_exec_file.display(), cart_path_dir);
+    // the path is only passed when set, so runtimes without Path support see the same arguments
+    let path_arg: &[&str] = if cart_path_dir.is_empty() { &[] } else { &[cart_path_dir] };
     let child = Command::new("gamescope")
         .args(cart_gsopts)
         .args(orientation_gamescope_args())
         .arg("--")
         .arg("./.kazeta/share/run")
         .arg(cart_exec_file)
+        .args(path_arg)
         .current_dir(cart_home)
         .env("HOME", cart_home)
         .env("XDG_CONFIG_HOME", cart_home.join(".config"))
