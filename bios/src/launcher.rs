@@ -4,6 +4,7 @@
 // shuts down when pressed in the bios.
 // Session duties (controllers, audio, logging, power off) are left to kazeta-session.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,11 @@ pub fn runtime_dir() -> PathBuf {
 
 fn cart_exec_file() -> PathBuf {
     runtime_dir().join("kazeta-cart-exec")
+}
+
+/// The cart's `Env` lines (`NAME=value`), one per line, for the runtime to export
+fn cart_env_file() -> PathBuf {
+    runtime_dir().join("kazeta-cart-env")
 }
 
 /// Written by the bios UI with the path of the cart to launch once it exits
@@ -392,6 +398,16 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     };
     let cart_exec_file = cart_exec_file();
     let _ = fs::write(&cart_exec_file, format!("{}\n", cart_exec));
+    // environment variables the runtime sets for the game (Linux) or for Proton (Windows), not gamescope
+    let cart_env = save::get_attributes(&cart_info, "Env").unwrap_or_default();
+    let cart_env_file = cart_env_file();
+    let _ = fs::remove_file(&cart_env_file);
+    let cart_env_file = if cart_env.is_empty() {
+        None
+    } else {
+        let _ = fs::write(&cart_env_file, cart_env.iter().map(|var| format!("{}\n", var)).collect::<String>());
+        Some(cart_env_file)
+    };
 
     let var_dir = cart_home.join(".kazeta/var");
     let playtime_start = var_dir.join("playtime_start");
@@ -417,7 +433,7 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     let playtime = PlaytimeCapture::start(playtime_end);
 
     // skip the game if we were asked to stop while mounting; cleanup still runs
-    let status = if stop() { 1 } else { run_game(&cart_home, &cart_gsopts, &cart_exec_file, &cart_path_dir, stop) };
+    let status = if stop() { 1 } else { run_game(&cart_home, &cart_gsopts, &cart_exec_file, &cart_path_dir, cart_env_file.as_deref(), stop) };
 
     playtime.stop();
     drop(cleanup);
@@ -425,17 +441,31 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     status
 }
 
-fn run_game(cart_home: &Path, cart_gsopts: &[String], cart_exec_file: &Path, cart_path_dir: &str, stop: &dyn Fn() -> bool) -> i32 {
-    eprintln!("+ gamescope {:?} -- ./.kazeta/share/run {} {}", cart_gsopts, cart_exec_file.display(), cart_path_dir);
-    // the path is only passed when set, so runtimes without Path support see the same arguments
-    let path_arg: &[&str] = if cart_path_dir.is_empty() { &[] } else { &[cart_path_dir] };
+fn run_game(
+    cart_home: &Path,
+    cart_gsopts: &[String],
+    cart_exec_file: &Path,
+    cart_path_dir: &str,
+    cart_env_file: Option<&Path>,
+    stop: &dyn Fn() -> bool,
+) -> i32 {
+    // the path and env file are only passed when set, so runtimes without support for them see the
+    // same arguments; the env file comes after the path, which is then "." when the cart has none
+    let mut run_args: Vec<&OsStr> = Vec::new();
+    if !cart_path_dir.is_empty() || cart_env_file.is_some() {
+        run_args.push(OsStr::new(if cart_path_dir.is_empty() { "." } else { cart_path_dir }));
+    }
+    if let Some(cart_env_file) = cart_env_file {
+        run_args.push(cart_env_file.as_os_str());
+    }
+    eprintln!("+ gamescope {:?} -- ./.kazeta/share/run {} {:?}", cart_gsopts, cart_exec_file.display(), run_args);
     let child = Command::new("gamescope")
         .args(cart_gsopts)
         .args(orientation_gamescope_args())
         .arg("--")
         .arg("./.kazeta/share/run")
         .arg(cart_exec_file)
-        .args(path_arg)
+        .args(&run_args)
         .current_dir(cart_home)
         .env("HOME", cart_home)
         .env("XDG_CONFIG_HOME", cart_home.join(".config"))

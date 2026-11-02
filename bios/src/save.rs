@@ -211,6 +211,19 @@ pub fn get_attribute(info_file: &Path, attribute: &str) -> io::Result<String> {
     Ok(String::new())
 }
 
+/// Every value of an attribute that may appear on several lines (e.g. `Env`), in file order
+pub fn get_attributes(info_file: &Path, attribute: &str) -> io::Result<Vec<String>> {
+    let file = fs::File::open(info_file)?;
+    let prefix = format!("{}=", attribute);
+    let mut values = Vec::new();
+    for line in io::BufReader::new(file).lines() {
+        if let Some(value) = line?.strip_prefix(&prefix) {
+            values.push(value.to_string());
+        }
+    }
+    Ok(values)
+}
+
 pub fn list_devices() -> io::Result<Vec<(String, u32)>> {
     let mut devices = Vec::new();
     let disks = Disks::new_with_refreshed_list();
