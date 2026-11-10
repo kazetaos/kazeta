@@ -19,6 +19,7 @@ const EXCLUDED_DIRS: &[&str] = &[
     ".kazeta/var/prefix/dosdevices",
     ".kazeta/var/prefix/drive_c/windows",
     ".kazeta/var/prefix/pfx",
+    ".kazeta/var/prefix/.update-timestamp",
     ".local/share/gvfs-metadata"
 ];
 
