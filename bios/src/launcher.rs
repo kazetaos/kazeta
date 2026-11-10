@@ -18,6 +18,7 @@ use chrono::{Local, SecondsFormat};
 use crate::save;
 use crate::power;
 use crate::signals;
+use crate::update;
 use crate::volume;
 
 const NONE_RUNTIME: &str = "/usr/share/kazeta/runtimes/none.kzr";
@@ -298,7 +299,14 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
 
     volume::watch();
     let power_key = power::watch();
-    let stop = || terminated.get() || power_key.pressed();
+    let stop = || {
+        // powering off while an update is being installed could leave it half written
+        if power_key.pressed() && update::running() {
+            eprintln!("Power button pressed during an update, ignoring it");
+            power_key.clear();
+        }
+        terminated.get() || power_key.pressed()
+    };
     // the cart that was just played, so the bios does not start it again right away
     let mut last_cart: Option<PathBuf> = None;
     loop {

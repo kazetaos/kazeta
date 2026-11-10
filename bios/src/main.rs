@@ -14,6 +14,7 @@ mod launcher;
 mod power;
 mod save;
 mod signals;
+mod update;
 mod volume;
 
 const SCREEN_WIDTH: i32 = 640;
@@ -133,6 +134,7 @@ enum Screen {
     SaveData,
     Display,
     CartSelect,
+    Update,
     FadingOut,
 }
 
@@ -1432,6 +1434,98 @@ fn render_cart_select(
     }
 }
 
+/// Draw a progress bar across the middle of the screen, like the one for copying save data
+fn draw_progress_bar(progress: f32, alpha: f32) {
+    let color = Color { a: alpha, ..WHITE };
+    let x = (FONT_SIZE*3) as f32;
+    let y = SCREEN_HEIGHT as f32 / 2.0;
+    let width = (SCREEN_WIDTH as u16 - FONT_SIZE*6) as f32;
+    draw_rectangle_lines(x, y, width, 1.2*FONT_SIZE as f32, 4.0, color);
+    draw_rectangle(
+        x + 0.2*FONT_SIZE as f32,
+        y + 0.2*FONT_SIZE as f32,
+        (width - 0.4*FONT_SIZE as f32) * progress.clamp(0.0, 1.0),
+        0.8*FONT_SIZE as f32,
+        color,
+    );
+}
+
+/// The update screen: a title and the update's name, then either the options or a progress bar.
+/// Without a name the options start right below the title; they scroll when they do not fit.
+fn render_update(
+    ctx: &DrawContext,
+    title: &str,
+    name: Option<&str>,
+    options: &[String],
+    selected_option: usize,
+    progress: Option<f32>,
+    animation_state: &AnimationState,
+    alpha: f32,
+) {
+    const TITLE_Y: f32 = 120.0;
+    const NAME_Y: f32 = 144.0;
+    const MENU_GAP: f32 = 36.0;
+    const MENU_OPTION_HEIGHT: f32 = 40.0;
+    const MENU_PADDING: f32 = 16.0;
+    const VISIBLE_OPTIONS: usize = 4;
+    const SCROLL_INDICATOR_SIZE: f32 = 8.0;
+
+    if alpha <= 0.0 {
+        return;
+    }
+
+    let centered_x = |text: &str| ((SCREEN_WIDTH as f32 - measure_text(text, Some(&ctx.font), FONT_SIZE, 1.0).width) / 2.0).round();
+    text_with_alpha(ctx, title, centered_x(title), TITLE_Y, alpha);
+    if let Some(name) = name {
+        let name = fit_text(ctx, name, SCREEN_WIDTH as f32 - 4.0 * PADDING);
+        text_with_alpha(ctx, &name, centered_x(&name), NAME_Y, alpha);
+    }
+
+    if let Some(progress) = progress {
+        draw_progress_bar(progress, alpha);
+        return;
+    }
+
+    let menu_start_y = if name.is_some() { NAME_Y } else { TITLE_Y } + MENU_GAP;
+    // scroll so the selected option stays visible
+    let first = selected_option.saturating_sub(VISIBLE_OPTIONS - 1).min(options.len().saturating_sub(VISIBLE_OPTIONS));
+    for (row, (i, option)) in options.iter().enumerate().skip(first).take(VISIBLE_OPTIONS).enumerate() {
+        let y_pos = menu_start_y + (row as f32 * MENU_OPTION_HEIGHT);
+        let label = fit_text(ctx, option, SCREEN_WIDTH as f32 - 4.0 * PADDING);
+        let text_width = measure_text(&label, Some(&ctx.font), FONT_SIZE, 1.0).width;
+
+        if i == selected_option {
+            let mut cursor_color = animation_state.get_cursor_color();
+            cursor_color.a *= alpha;
+            let cursor_scale = animation_state.get_cursor_scale();
+            let base_width = text_width + (MENU_PADDING * 2.0);
+            let base_height = FONT_SIZE as f32 + (MENU_PADDING * 2.0);
+            let scaled_width = base_width * cursor_scale;
+            let scaled_height = base_height * cursor_scale;
+            let offset_x = (scaled_width - base_width) / 2.0;
+            let offset_y = (scaled_height - base_height) / 2.0;
+            let x_pos = (SCREEN_WIDTH as f32 - base_width) / 2.0;
+
+            draw_rectangle_lines(x_pos - offset_x, y_pos - 7.0 - offset_y, scaled_width, scaled_height/1.5, 4.0, cursor_color);
+        }
+
+        text_with_alpha(ctx, &label, (SCREEN_WIDTH as f32 - text_width) / 2.0, y_pos + MENU_PADDING, alpha);
+    }
+
+    // arrows above and below the list when it scrolls
+    let color = Color { a: alpha, ..WHITE };
+    let center_x = SCREEN_WIDTH as f32 / 2.0;
+    let half = SCROLL_INDICATOR_SIZE / 2.0;
+    if first > 0 {
+        let y = menu_start_y - 14.0;
+        draw_triangle(Vec2::new(center_x - half, y + half), Vec2::new(center_x + half, y + half), Vec2::new(center_x, y - half), color);
+    }
+    if first + VISIBLE_OPTIONS < options.len() {
+        let y = menu_start_y + VISIBLE_OPTIONS as f32 * MENU_OPTION_HEIGHT;
+        draw_triangle(Vec2::new(center_x - half, y - half), Vec2::new(center_x + half, y - half), Vec2::new(center_x, y + half), color);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -1496,17 +1590,23 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
     const FADE_DURATION: f64 = 1.0; // 1 second fade
     const FADE_LINGER_DURATION: f64 = 0.5; // 0.5 seconds to linger on black screen
 
-    // Watch for carts while the launcher or cart selection screen is shown
+    // Watch for carts and system updates while the launcher, cart selection or update screen is shown
     let inserted_carts: Arc<Mutex<Vec<InsertedCart>>> = Arc::new(Mutex::new(Vec::new()));
+    let available_updates: Arc<Mutex<Vec<std::path::PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let cart_watch = Arc::new(AtomicBool::new(true));
     {
         let inserted_carts = inserted_carts.clone();
+        let available_updates = available_updates.clone();
         let cart_watch = cart_watch.clone();
         let mut ignored_cart = ignored_cart;
         let mut known_carts: Vec<InsertedCart> = Vec::new();
         thread::spawn(move || loop {
             let mut paths = Vec::new();
             if cart_watch.load(Ordering::Relaxed) {
+                let updates = update::find_updates();
+                if let Ok(mut available) = available_updates.lock() {
+                    *available = updates;
+                }
                 paths = launcher::find_carts();
                 // the media of the cart that was just played counts as removed until it is actually removed
                 if ignored_cart.as_ref().is_some_and(|ignored| paths.contains(ignored)) {
@@ -1540,6 +1640,15 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
     let mut cart_select_leaving = false;
     let mut cart_chosen = false;
     let mut cart_icons: HashMap<std::path::PathBuf, Texture2D> = HashMap::new();
+
+    // update screen state; like the cart selection it reveals with the logo moving up
+    // the updates offered, and the one being installed
+    let mut update_list: Vec<std::path::PathBuf> = Vec::new();
+    let mut update_path = std::path::PathBuf::new();
+    let mut update_selection: usize = 0;
+    let mut update_reveal: f32 = 0.0;
+    let mut update_leaving = false;
+    let mut update_status: Option<Arc<Mutex<update::UpdateStatus>>> = None;
 
     // Create thread-safe storage media state
     let storage_state = Arc::new(Mutex::new(StorageMediaState::new()));
@@ -1639,7 +1748,7 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
         animation_state.update_cursor_animation(get_frame_time());
         animation_state.update_dialog_transition(get_frame_time());
 
-        cart_watch.store(matches!(current_screen, Screen::Launcher | Screen::CartSelect), Ordering::Relaxed);
+        cart_watch.store(matches!(current_screen, Screen::Launcher | Screen::CartSelect | Screen::Update), Ordering::Relaxed);
 
         // Update dialog state based on animation
         if animation_state.dialog_transition_time <= 0.0 {
@@ -1661,10 +1770,11 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                 logo_alpha = ((get_time() - launcher_start_time) / LOGO_FADE_IN_DURATION).min(1.0) as f32;
                 let carts = inserted_carts.lock().map(|carts| carts.clone()).unwrap_or_default();
                 let cart_inserted = !carts.is_empty();
+                let found_updates = available_updates.lock().map(|updates| updates.clone()).unwrap_or_default();
 
-                // input or a cart ends the bouncing logo; the press that ends it does nothing else
+                // input, a cart or an update ends the bouncing logo; the press that ends it does nothing else
                 let mut woken = false;
-                if input_state.any() || cart_inserted {
+                if input_state.any() || cart_inserted || !found_updates.is_empty() {
                     woken = logo_bounce.take().is_some();
                     last_activity_time = get_time();
                 }
@@ -1698,7 +1808,15 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                 // show the logo for a minimum time at startup before starting an inserted cart
                 let logo_shown_long_enough = get_time() - launcher_start_time >= LOGO_MIN_DISPLAY_DURATION;
                 if logo_shown_long_enough {
-                    if carts.len() == 1 {
+                    if !found_updates.is_empty() {
+                        // updates are offered before any cart is started
+                        update_list = found_updates;
+                        update_selection = 0;
+                        update_reveal = 0.0;
+                        update_leaving = false;
+                        update_status = None;
+                        current_screen = Screen::Update;
+                    } else if carts.len() == 1 {
                         if hand_over_cart(&carts[0].path) {
                             sound_effects.play_select();
                             fade_start_time = Some(get_time());
@@ -1810,6 +1928,98 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                         sound_effects.play_select();
                         cart_select_leaving = true;
                         cart_chosen = true;
+                    }
+                }
+            },
+            Screen::Update => {
+                let status = update_status.as_ref().and_then(|status| status.lock().ok().map(|status| *status));
+                if status.is_none() && !update_leaving {
+                    let updates = available_updates.lock().map(|updates| updates.clone()).unwrap_or_default();
+                    if updates.is_empty() {
+                        // the updates were removed, go back to the logo
+                        update_leaving = true;
+                    } else {
+                        update_list = updates;
+                    }
+                }
+
+                let step = get_frame_time();
+                update_reveal = if update_leaving {
+                    (update_reveal - step).max(0.0)
+                } else {
+                    (update_reveal + step).min(MENU_REVEAL_DURATION)
+                };
+                let (logo_t, text_alpha) = menu_reveal_progress(update_reveal);
+
+                // a single update is confirmed by name; with several, choosing one installs it
+                let choosing = status.is_none() && update_list.len() > 1;
+                if status.is_none() && update_list.len() == 1 {
+                    update_path = update_list[0].clone();
+                }
+                let (title, options, progress): (&str, Vec<String>, Option<f32>) = match status {
+                    None if choosing => (
+                        "SYSTEM UPDATES AVAILABLE",
+                        update_list.iter().map(|update| update::deployment_name(update)).chain(["CANCEL".to_string()]).collect(),
+                        None,
+                    ),
+                    None => ("SYSTEM UPDATE AVAILABLE", vec!["UPDATE".to_string(), "CANCEL".to_string()], None),
+                    Some(update::UpdateStatus::Running(percent)) => ("INSTALLING SYSTEM UPDATE", Vec::new(), Some(percent as f32 / 100.0)),
+                    Some(update::UpdateStatus::Done) => ("UPDATE COMPLETE", vec!["RESTART".to_string()], None),
+                    Some(update::UpdateStatus::Failed) => ("UPDATE FAILED", vec!["OK".to_string()], None),
+                };
+                update_selection = update_selection.min(options.len().saturating_sub(1));
+                let name = (!choosing).then(|| update::deployment_name(&update_path));
+                render_update(&ctx, title, name.as_deref(), &options, update_selection, progress, &animation_state, text_alpha);
+                let logo_y = logo_center_y + (LOGO_MENU_Y - logo_center_y) * logo_t;
+                draw_texture(&logo, LOGO_X, logo_y, Color { a: logo_alpha, ..WHITE });
+
+                if update_leaving {
+                    if update_reveal <= 0.0 {
+                        current_screen = Screen::Launcher;
+                        launcher_screen_time = get_time();
+                        last_activity_time = launcher_screen_time;
+                    }
+                } else if update_reveal >= MENU_REVEAL_DURATION && !options.is_empty() {
+                    // the selection stops at the ends of the list
+                    if input_state.up && update_selection > 0 {
+                        update_selection -= 1;
+                        animation_state.trigger_transition();
+                        sound_effects.play_cursor_move();
+                    }
+                    if input_state.down && update_selection + 1 < options.len() {
+                        update_selection += 1;
+                        animation_state.trigger_transition();
+                        sound_effects.play_cursor_move();
+                    }
+
+                    // cancel is always the last option
+                    let cancel = options.len() - 1;
+                    let chosen = if input_state.select || input_state.start {
+                        Some(update_selection)
+                    } else if input_state.back && status.is_none() {
+                        Some(cancel)
+                    } else {
+                        None
+                    };
+                    match (status, chosen) {
+                        (None, Some(i)) if i != cancel => {
+                            if choosing {
+                                update_path = update_list[i].clone();
+                            }
+                            sound_effects.play_select();
+                            update_status = Some(update::install(update_path.clone()));
+                        },
+                        (Some(update::UpdateStatus::Done), Some(_)) => {
+                            sound_effects.play_select();
+                            update::reboot();
+                        },
+                        (_, Some(_)) => {
+                            // not offered again until they are removed, also after a failure
+                            update::decline(&update_list);
+                            sound_effects.play_back();
+                            update_leaving = true;
+                        },
+                        (_, None) => {},
                     }
                 }
             },
