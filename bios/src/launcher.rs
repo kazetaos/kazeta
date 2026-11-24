@@ -1,6 +1,7 @@
 // Cart launcher: mounts a cart and runs it under gamescope.
 // Without a cart argument the bios UI is started first; it waits for a cart and hands it back here,
-// and is started again once the game exits. Pressing the power button stops a running game, or
+// and is started again once the game exits. The bios and games share one gamescope session where
+// possible, see session.rs. Pressing the power button stops a running game, or
 // shuts down when pressed in the bios.
 // Session duties (controllers, audio, logging, power off) are left to kazeta-session.
 
@@ -17,6 +18,7 @@ use chrono::{Local, SecondsFormat};
 
 use crate::save;
 use crate::power;
+use crate::session::{self, RunningBios, RuntimeOptions, Session};
 use crate::signals;
 use crate::update;
 use crate::volume;
@@ -158,27 +160,71 @@ fn pkexec_mount(args: &[&Path]) {
     }
 }
 
-/// Run the bios UI; `ignored_cart` is not started by it until it has been removed
-fn run_bios(resolution_args: &[String], ignored_cart: Option<&Path>, stop: &dyn Fn() -> bool) -> i32 {
+/// Options gamescope needs at startup for the bios: the display menu's resolution and orientation
+fn bios_gamescope_args() -> Vec<String> {
+    let mut args = resolution_gamescope_args();
+    args.extend(orientation_gamescope_args());
+    args
+}
+
+/// The bios is drawn with pixel scaling
+fn bios_runtime_options() -> RuntimeOptions {
+    RuntimeOptions { filter: Some(4), ..RuntimeOptions::default() }
+}
+
+/// How often the running bios is checked for a cart it handed over
+const BIOS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// What the bios left behind: the cart to start, if any, and the bios itself when it is still
+/// showing that the cart is starting
+struct BiosOutcome {
+    status: i32,
+    cart: Option<PathBuf>,
+    bios: Option<RunningBios>,
+}
+
+/// Take the cart the bios handed over, if it did
+fn take_boot_cart() -> Option<PathBuf> {
+    let boot_cart_file = boot_cart_file();
+    let cart = fs::read_to_string(&boot_cart_file).ok().map(|path| PathBuf::from(path.trim()));
+    let _ = fs::remove_file(&boot_cart_file);
+    cart
+}
+
+/// Run the bios UI in the gamescope session until it hands over a cart or exits; `ignored_cart` is
+/// not started by it until it has been removed
+fn run_bios(session: &Session, ignored_cart: Option<&Path>, stop: &dyn Fn() -> bool) -> BiosOutcome {
+    session.apply(&bios_runtime_options());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kazeta"));
-    eprintln!("+ gamescope {:?} --filter pixel -- {} {} {:?}", resolution_args, exe.display(), UI_ARG, ignored_cart);
-    let child = Command::new("gamescope")
-        .args(resolution_args)
-        .args(orientation_gamescope_args())
-        .args(["--filter", "pixel", "--"])
-        .arg(exe)
+    eprintln!("+ {} {} {:?}", exe.display(), UI_ARG, ignored_cart);
+    let child = Command::new(exe)
+        .env_clear()
+        .envs(session.env.iter().map(|(key, value)| (key, value)))
         .arg(UI_ARG)
         .args(ignored_cart)
         .spawn();
-    match child {
-        Ok(mut child) => {
-            let _ = signals::wait_child(&mut child, stop, GAMESCOPE_KILL_TIMEOUT);
-            0
-        }
+    let mut child = match child {
+        Ok(child) => child,
         Err(e) => {
-            eprintln!("Failed to start gamescope: {}", e);
-            1
+            eprintln!("Failed to start the bios: {}", e);
+            return BiosOutcome { status: 1, cart: None, bios: None };
         }
+    };
+
+    loop {
+        // the child has not been reaped yet, so its pid cannot have been reused
+        if !matches!(child.try_wait(), Ok(None)) {
+            return BiosOutcome { status: 0, cart: take_boot_cart(), bios: None };
+        }
+        // it keeps running, showing that the game is starting, until the game shows a window
+        if let Some(cart) = take_boot_cart() {
+            return BiosOutcome { status: 0, cart: Some(cart), bios: Some(RunningBios(child)) };
+        }
+        if stop() {
+            drop(RunningBios(child));
+            return BiosOutcome { status: 0, cart: None, bios: None };
+        }
+        thread::sleep(BIOS_POLL_INTERVAL);
     }
 }
 
@@ -294,7 +340,7 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
                 return 1;
             }
         };
-        return run_cart(cart, &base_dir, &|| terminated.get());
+        return run_cart(cart, &base_dir, &mut None, None, &|| terminated.get());
     }
 
     volume::watch();
@@ -309,16 +355,27 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
     };
     // the cart that was just played, so the bios does not start it again right away
     let mut last_cart: Option<PathBuf> = None;
+    // gamescope shared by the bios and games, stopped when dropped
+    let mut session: Option<Session> = None;
     loop {
         // a press that stopped the game must not also shut down from the bios
         power_key.clear();
 
+        // started again when it is gone, or the display menu changed what it needs at startup
+        let bios_args = bios_gamescope_args();
+        if !session.as_mut().is_some_and(|s| s.running() && s.startup_args == bios_args) {
+            // the old gamescope has to let go of the display before a new one starts
+            drop(session.take());
+            session = Session::start(bios_args, &stop);
+        }
+        let Some(bios_session) = session.as_ref() else {
+            eprintln!("Failed to start gamescope for the bios");
+            return 1;
+        };
+
         // the bios waits for a cart and leaves its path behind when one should be launched
-        let boot_cart_file = boot_cart_file();
-        let _ = fs::remove_file(&boot_cart_file);
-        let status = run_bios(&resolution_gamescope_args(), last_cart.as_deref(), &stop);
-        let cart = fs::read_to_string(&boot_cart_file).ok().map(|path| PathBuf::from(path.trim()));
-        let _ = fs::remove_file(&boot_cart_file);
+        let _ = fs::remove_file(boot_cart_file());
+        let BiosOutcome { status, cart, bios } = run_bios(bios_session, last_cart.as_deref(), &stop);
 
         if terminated.get() {
             return 1;
@@ -332,7 +389,7 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
         };
 
         // a power button press stops the game and brings us back to the bios
-        let status = run_cart(cart.clone(), &base_dir, &stop);
+        let status = run_cart(cart.clone(), &base_dir, &mut session, bios, &stop);
         eprintln!("Game exited with status {}", status);
         if terminated.get() {
             return 1;
@@ -341,8 +398,10 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
     }
 }
 
-/// Mount and run a cart until the game exits or `stop` returns true
-fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
+/// Mount and run a cart until the game exits or `stop` returns true. The game runs in `session` when
+/// its gamescope options allow it, otherwise the session is stopped for a gamescope of the game's own.
+/// `bios` stays on screen until the game shows a window, and is stopped if the game is not started.
+fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios: Option<RunningBios>, stop: &dyn Fn() -> bool) -> i32 {
     if stop() {
         return 1;
     }
@@ -441,7 +500,8 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     let playtime = PlaytimeCapture::start(playtime_end);
 
     // skip the game if we were asked to stop while mounting; cleanup still runs
-    let status = if stop() { 1 } else { run_game(&cart_home, &cart_gsopts, &cart_exec_file, &cart_path_dir, cart_env_file.as_deref(), stop) };
+    let game = Game { cart_home: &cart_home, cart_exec_file: &cart_exec_file, cart_path_dir: &cart_path_dir, cart_env_file: cart_env_file.as_deref() };
+    let status = if stop() { 1 } else { run_game(&game, &cart_gsopts, session, bios, stop) };
 
     playtime.stop();
     drop(cleanup);
@@ -449,44 +509,108 @@ fn run_cart(cart: PathBuf, base_dir: &Path, stop: &dyn Fn() -> bool) -> i32 {
     status
 }
 
-fn run_game(
-    cart_home: &Path,
-    cart_gsopts: &[String],
-    cart_exec_file: &Path,
-    cart_path_dir: &str,
-    cart_env_file: Option<&Path>,
-    stop: &dyn Fn() -> bool,
-) -> i32 {
-    // the path and env file are only passed when set, so runtimes without support for them see the
-    // same arguments; the env file comes after the path, which is then "." when the cart has none
-    let mut run_args: Vec<&OsStr> = Vec::new();
-    if !cart_path_dir.is_empty() || cart_env_file.is_some() {
-        run_args.push(OsStr::new(if cart_path_dir.is_empty() { "." } else { cart_path_dir }));
+/// What is needed to start a cart's game
+struct Game<'a> {
+    cart_home: &'a Path,
+    cart_exec_file: &'a Path,
+    cart_path_dir: &'a str,
+    cart_env_file: Option<&'a Path>,
+}
+
+impl Game<'_> {
+    /// Arguments for the runtime's run script. The path and env file are only passed when set, so
+    /// runtimes without support for them see the same arguments; the env file comes after the path,
+    /// which is then "." when the cart has none.
+    fn run_args(&self) -> Vec<&OsStr> {
+        let mut run_args: Vec<&OsStr> = vec![OsStr::new("./.kazeta/share/run"), self.cart_exec_file.as_os_str()];
+        if !self.cart_path_dir.is_empty() || self.cart_env_file.is_some() {
+            run_args.push(OsStr::new(if self.cart_path_dir.is_empty() { "." } else { self.cart_path_dir }));
+        }
+        if let Some(cart_env_file) = self.cart_env_file {
+            run_args.push(cart_env_file.as_os_str());
+        }
+        run_args
     }
-    if let Some(cart_env_file) = cart_env_file {
-        run_args.push(cart_env_file.as_os_str());
+
+    /// The game's home and XDG directories, in the cart's writable home
+    fn configure(&self, command: &mut Command) {
+        let cart_home = self.cart_home;
+        command
+            .current_dir(cart_home)
+            .env("HOME", cart_home)
+            .env("XDG_CONFIG_HOME", cart_home.join(".config"))
+            .env("XDG_DATA_HOME", cart_home.join(".local/share"))
+            .env("XDG_CACHE_HOME", cart_home.join(".cache"))
+            .env("XDG_STATE_HOME", cart_home.join(".local/state"))
+            .stdout(Stdio::piped());
     }
-    eprintln!("+ gamescope {:?} -- ./.kazeta/share/run {} {:?}", cart_gsopts, cart_exec_file.display(), run_args);
-    let child = Command::new("gamescope")
+}
+
+fn run_game(game: &Game, cart_gsopts: &[String], session: &mut Option<Session>, bios: Option<RunningBios>, stop: &dyn Fn() -> bool) -> i32 {
+    let (options, mut startup_args) = session::split_options(cart_gsopts);
+    startup_args.extend(orientation_gamescope_args());
+
+    let fits_session = session.as_mut().is_some_and(|s| s.running() && s.startup_args == startup_args);
+    if let Some(current) = session.as_ref().filter(|_| fits_session) {
+        current.prepare_game_display(&options);
+        // unset options get gamescope's defaults rather than what the bios uses, applied once the
+        // bios has made way for the game
+        let handoff = match bios {
+            Some(bios) => Some(current.hand_off(bios, options)),
+            None => {
+                current.apply(&options);
+                None
+            }
+        };
+        let status = run_game_in_session(game, current, stop);
+        drop(handoff);
+        return status;
+    }
+
+    // the game needs gamescope started with its options; the bios gets the session back afterwards
+    drop(bios);
+    *session = None;
+    run_game_in_own_gamescope(game, cart_gsopts, stop)
+}
+
+/// Run the game on the games' Xwayland server of the shared gamescope session
+fn run_game_in_session(game: &Game, session: &Session, stop: &dyn Fn() -> bool) -> i32 {
+    let run_args = game.run_args();
+    let display = &session.game_display;
+    eprintln!("+ DISPLAY={} gamescopereaper -- {:?}", display, run_args);
+    let mut command = Command::new("gamescopereaper");
+    command
+        .env_clear()
+        .envs(session.env.iter().map(|(key, value)| (key, value)))
+        .env("DISPLAY", display)
+        // kills everything the game started once the game exits or is stopped
+        .arg("--")
+        .args(&run_args);
+    game.configure(&mut command);
+    wait_game(game, command.spawn(), stop)
+}
+
+/// Run the game in a gamescope started with its options
+fn run_game_in_own_gamescope(game: &Game, cart_gsopts: &[String], stop: &dyn Fn() -> bool) -> i32 {
+    let run_args = game.run_args();
+    eprintln!("+ gamescope {:?} -- {:?}", cart_gsopts, run_args);
+    let mut command = Command::new("gamescope");
+    command
         .args(cart_gsopts)
         .args(orientation_gamescope_args())
         .arg("--")
-        .arg("./.kazeta/share/run")
-        .arg(cart_exec_file)
-        .args(&run_args)
-        .current_dir(cart_home)
-        .env("HOME", cart_home)
-        .env("XDG_CONFIG_HOME", cart_home.join(".config"))
-        .env("XDG_DATA_HOME", cart_home.join(".local/share"))
-        .env("XDG_CACHE_HOME", cart_home.join(".cache"))
-        .env("XDG_STATE_HOME", cart_home.join(".local/state"))
-        .stdout(Stdio::piped())
-        .spawn();
+        .args(&run_args);
+    game.configure(&mut command);
+    wait_game(game, command.spawn(), stop)
+}
 
+/// Wait for the started game to exit, logging its output to the cart's run log
+fn wait_game(game: &Game, child: io::Result<std::process::Child>, stop: &dyn Fn() -> bool) -> i32 {
+    let cart_home = game.cart_home;
     let mut child = match child {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("Failed to start gamescope: {}", e);
+            eprintln!("Failed to start the game: {}", e);
             return 1;
         }
     };

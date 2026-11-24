@@ -13,6 +13,7 @@ use std::process;
 mod launcher;
 mod power;
 mod save;
+mod session;
 mod signals;
 mod update;
 mod volume;
@@ -1320,10 +1321,13 @@ fn render_display_menu(
     }
 }
 
-/// Hand a cart to the launcher, which starts it once the bios exits
+/// Hand a cart to the launcher, which starts it while the bios shows that it is starting, and
+/// stops the bios once the game shows a window
 fn hand_over_cart(cart: &std::path::Path) -> bool {
     let boot_cart_file = launcher::boot_cart_file();
-    match fs::write(&boot_cart_file, cart.to_string_lossy().as_bytes()) {
+    // written in one go, as the launcher picks it up while the bios is running
+    let tmp = boot_cart_file.with_extension("tmp");
+    match fs::write(&tmp, cart.to_string_lossy().as_bytes()).and_then(|_| fs::rename(&tmp, &boot_cart_file)) {
         Ok(_) => true,
         Err(e) => {
             eprintln!("Failed to write {}: {}", boot_cart_file.display(), e);
@@ -1531,6 +1535,8 @@ fn main() {
     match args.get(1).map(String::as_str) {
         // started by the launcher under gamescope
         Some(launcher::UI_ARG) => macroquad::Window::from_config(window_conf(), bios_main(args.get(2).map(std::path::PathBuf::from))),
+        // gamescope's primary child for the session, reports gamescope's environment and exits
+        Some(session::HOLD_ARG) => process::exit(args.get(2).map_or(1, |file| session::hold(file))),
         // run the given cart, or the bios which waits for one
         cart => process::exit(launcher::run(cart)),
     }
@@ -1589,6 +1595,7 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
     let mut fade_start_time: Option<f64> = None;
     const FADE_DURATION: f64 = 1.0; // 1 second fade
     const FADE_LINGER_DURATION: f64 = 0.5; // 0.5 seconds to linger on black screen
+    const STARTING_PULSE_PERIOD: f64 = 2.0; // one breath of the logo while a game starts
 
     // Watch for carts and system updates while the launcher, cart selection or update screen is shown
     let inserted_carts: Arc<Mutex<Vec<InsertedCart>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2030,9 +2037,12 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                     let fade_progress = (elapsed / FADE_DURATION).min(1.0) as f32;
                     draw_texture(&logo, LOGO_X, logo_center_y, Color { a: logo_alpha * (1.0 - fade_progress), ..WHITE });
 
-                    // If fade is complete, wait for linger duration then exit
-                    if fade_progress >= 1.0 && elapsed - FADE_DURATION >= FADE_LINGER_DURATION {
-                        process::exit(0);
+                    // once faded out and lingered, the logo breathes until the game shows a window
+                    // and the launcher stops the bios
+                    let starting = elapsed - FADE_DURATION - FADE_LINGER_DURATION;
+                    if starting > 0.0 {
+                        let alpha = 0.5 - 0.5 * (starting * std::f64::consts::TAU / STARTING_PULSE_PERIOD).cos();
+                        draw_texture(&logo, LOGO_X, logo_center_y, Color { a: alpha as f32, ..WHITE });
                     }
                 }
             },

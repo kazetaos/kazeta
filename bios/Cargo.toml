@@ -17,3 +17,4 @@ signal-hook = "0.4"
 libc = "0.2"
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "async-io"] }
 evdev = "0.12"
+x11rb = "0.13"
