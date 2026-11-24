@@ -1,0 +1,10 @@
+// let the bios mount carts through its mount helper (kazeta --mount-helper, see bios/src/mount.rs),
+// for the user at the machine; only the helper's command line is allowed, not the bios itself
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/bin/kazeta" &&
+        action.lookup("command_line").indexOf("/usr/bin/kazeta --mount-helper ") == 0 &&
+        subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use chrono::{Local, SecondsFormat};
 
+use crate::mount::{self, Slot};
 use crate::save;
 use crate::power;
 use crate::session::{self, RunningBios, RuntimeOptions, Session};
@@ -107,10 +108,10 @@ pub fn cart_details(cart: &Path) -> CartDetails {
     let is_pkg = cart.extension().is_some_and(|ext| ext == "kzp");
     let mut details = if is_pkg {
         // separate from the mount point used to run a cart
-        let preview_mount = save::get_kazeta_data_dir().join("run/preview");
-        pkexec_mount(&[Path::new("kzp"), cart, &preview_mount]);
-        let details = find_cart_file(&preview_mount, "kzi").map(|info| read_cart_details(&info));
-        pkexec_mount(&[Path::new("kzp"), Path::new("--unmount"), &preview_mount]);
+        let details = mount::mount_pkg(Slot::Preview, cart)
+            .and_then(|preview_mount| find_cart_file(&preview_mount, "kzi"))
+            .map(|info| read_cart_details(&info));
+        mount::unmount(&[Slot::Preview]);
         details
     } else {
         Some(read_cart_details(cart))
@@ -149,15 +150,6 @@ fn read_cart_details(cart_info: &Path) -> CartDetails {
         fs::read(cart_info.parent().unwrap_or(Path::new("/")).join(icon)).ok()
     };
     CartDetails { name: attr("Name"), icon }
-}
-
-fn pkexec_mount(args: &[&Path]) {
-    eprintln!("+ pkexec kazeta-mount {:?}", args);
-    match Command::new("pkexec").arg("kazeta-mount").args(args).status() {
-        Ok(status) if !status.success() => eprintln!("kazeta-mount failed: {}", status),
-        Err(e) => eprintln!("Failed to run kazeta-mount: {}", e),
-        _ => {}
-    }
 }
 
 /// Options gamescope needs at startup for the bios: the display menu's resolution and orientation
@@ -294,20 +286,22 @@ impl PlaytimeCapture {
 
 /// Unmounts and tidies up after a cart, also when the launcher bails out early
 struct CartCleanup {
-    // kzp mount point, or the cart's own directory; unmounted either way like the original launcher
-    pkg_mount: Option<PathBuf>,
-    mounted: Option<(PathBuf, PathBuf)>,
+    pkg_mounted: bool,
+    cart_mounted: bool,
     upper: Option<PathBuf>,
 }
 
 impl Drop for CartCleanup {
     fn drop(&mut self) {
-        if let Some((target, runtimedir)) = &self.mounted {
-            pkexec_mount(&[Path::new("--unmount"), target, runtimedir]);
+        // in one go, as each helper run goes through pkexec
+        let mut slots = Vec::new();
+        if self.cart_mounted {
+            slots.extend([Slot::Cart, Slot::Runtime]);
         }
-        if let Some(pkg_mount) = &self.pkg_mount {
-            pkexec_mount(&[Path::new("kzp"), Path::new("--unmount"), pkg_mount]);
+        if self.pkg_mounted {
+            slots.push(Slot::Pkg);
         }
+        mount::unmount(&slots);
         if let Some(upper) = &self.upper {
             let _ = fs::remove_dir_all(upper.join(".kazeta/share"));
             // only removed if empty
@@ -403,13 +397,16 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
     }
     let is_pkg = cart.extension().is_some_and(|ext| ext == "kzp");
 
-    let mut cleanup = CartCleanup { pkg_mount: None, mounted: None, upper: None };
+    let mut cleanup = CartCleanup { pkg_mounted: false, cart_mounted: false, upper: None };
 
     let (cart_info, cart_path, media_path) = if is_pkg {
         let cart_pkg = cart;
-        let cart_path = base_dir.join("run/pkg");
-        pkexec_mount(&[Path::new("kzp"), &cart_pkg, &cart_path]);
-        cleanup.pkg_mount = Some(cart_path.clone());
+        // unmounted by the cleanup even when mounting fails, in case it got partway
+        cleanup.pkg_mounted = true;
+        let Some(cart_path) = mount::mount_pkg(Slot::Pkg, &cart_pkg) else {
+            eprintln!("Failed to mount {}", cart_pkg.display());
+            return 1;
+        };
         let Some(cart_info) = find_cart_file(&cart_path, "kzi") else {
             eprintln!("No cart info found in {}", cart_pkg.display());
             return 1;
@@ -419,7 +416,6 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
     } else {
         let cart_info = cart;
         let cart_path = cart_info.parent().unwrap_or(Path::new("/")).to_path_buf();
-        cleanup.pkg_mount = Some(cart_path.clone());
         (cart_info.clone(), cart_path.clone(), cart_path)
     };
 
@@ -429,9 +425,10 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
 
     let lower = cart_path.clone();
     let upper = base_dir.join("saves/default").join(&cart_id);
+    // overlayfs' work directory; the mount helper needs it to be the user's. The old kazeta-mount
+    // script created run/ as root: Kazeta OS removes it at boot (tmpfiles.d/kazeta.conf), elsewhere
+    // it has to be removed by hand
     let work = base_dir.join("run/work");
-    let target = base_dir.join("run/cart");
-    let runtimedir = base_dir.join("run/runtime");
 
     if !upper.is_dir() {
         let _ = fs::remove_file(&upper);
@@ -440,12 +437,15 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
 
     let runtime = find_runtime(&media_path, &attr("Runtime"));
 
-    pkexec_mount(&[&lower, &upper, &work, &target, &runtime, &runtimedir]);
-    cleanup.mounted = Some((target.clone(), runtimedir.clone()));
+    cleanup.cart_mounted = true;
     cleanup.upper = Some(upper.clone());
+    let Some(target) = mount::mount_cart(&lower, &upper, &work, &runtime) else {
+        eprintln!("Failed to mount cart {}", cart_id);
+        return 1;
+    };
 
     // home directory for the game, only applied to the game's environment below
-    let cart_home = target.clone();
+    let cart_home = target;
 
     let cart_exec = attr("Exec");
     // directory Exec runs from, relative to the cart root; the runtime changes to it

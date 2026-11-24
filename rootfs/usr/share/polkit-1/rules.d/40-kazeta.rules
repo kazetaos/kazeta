@@ -1,9 +1,3 @@
-polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.policykit.exec" && subject.isInGroup("wheel") && action.lookup("program") == "/usr/bin/kazeta-mount") {
-        return polkit.Result.YES;
-    }
-});
-
 // let the bios install system updates from external media
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.policykit.exec" && action.lookup("program") == "/usr/bin/frzr-deploy") {

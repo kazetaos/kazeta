@@ -11,6 +11,7 @@ use std::fs;
 use std::process;
 
 mod launcher;
+mod mount;
 mod power;
 mod save;
 mod session;
@@ -1537,6 +1538,8 @@ fn main() {
         Some(launcher::UI_ARG) => macroquad::Window::from_config(window_conf(), bios_main(args.get(2).map(std::path::PathBuf::from))),
         // gamescope's primary child for the session, reports gamescope's environment and exits
         Some(session::HOLD_ARG) => process::exit(args.get(2).map_or(1, |file| session::hold(file))),
+        // run as root by pkexec to mount and unmount carts, see mount.rs
+        Some(mount::HELPER_ARG) => process::exit(mount::helper_main(&args[2..])),
         // run the given cart, or the bios which waits for one
         cart => process::exit(launcher::run(cart)),
     }
