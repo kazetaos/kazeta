@@ -298,14 +298,10 @@ struct CartCleanup {
     pkg_mount: Option<PathBuf>,
     mounted: Option<(PathBuf, PathBuf)>,
     upper: Option<PathBuf>,
-    cart_home: Option<PathBuf>,
 }
 
 impl Drop for CartCleanup {
     fn drop(&mut self) {
-        if let Some(cart_home) = &self.cart_home {
-            let _ = fs::remove_file(cart_home.join(".local/share/gvfs-metadata"));
-        }
         if let Some((target, runtimedir)) = &self.mounted {
             pkexec_mount(&[Path::new("--unmount"), target, runtimedir]);
         }
@@ -407,7 +403,7 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
     }
     let is_pkg = cart.extension().is_some_and(|ext| ext == "kzp");
 
-    let mut cleanup = CartCleanup { pkg_mount: None, mounted: None, upper: None, cart_home: None };
+    let mut cleanup = CartCleanup { pkg_mount: None, mounted: None, upper: None };
 
     let (cart_info, cart_path, media_path) = if is_pkg {
         let cart_pkg = cart;
@@ -442,10 +438,6 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
         let _ = fs::create_dir_all(&upper);
     }
 
-    // workaround for gvfs-metadata preventing unmount
-    let _ = fs::create_dir_all(upper.join(".local/share"));
-    let _ = fs::File::create(upper.join(".local/share/gvfs-metadata"));
-
     let runtime = find_runtime(&media_path, &attr("Runtime"));
 
     pkexec_mount(&[&lower, &upper, &work, &target, &runtime, &runtimedir]);
@@ -454,7 +446,6 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
 
     // home directory for the game, only applied to the game's environment below
     let cart_home = target.clone();
-    cleanup.cart_home = Some(cart_home.clone());
 
     let cart_exec = attr("Exec");
     // directory Exec runs from, relative to the cart root; the runtime changes to it
@@ -542,6 +533,9 @@ impl Game<'_> {
             .env("XDG_DATA_HOME", cart_home.join(".local/share"))
             .env("XDG_CACHE_HOME", cart_home.join(".cache"))
             .env("XDG_STATE_HOME", cart_home.join(".local/state"))
+            // keep GLib from loading gvfs, which writes file metadata to .local/share/gvfs-metadata
+            // in the cart's home; games have no use for gvfs (network shares, trash, metadata)
+            .env("GIO_USE_VFS", "local")
             .stdout(Stdio::piped());
     }
 }
