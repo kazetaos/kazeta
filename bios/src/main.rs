@@ -78,7 +78,7 @@ impl SoundEffects {
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "kazeta".to_owned(),
+        window_title: "".to_owned(),
         window_resizable: false,
         window_width: SCREEN_WIDTH,
         window_height: SCREEN_HEIGHT,
