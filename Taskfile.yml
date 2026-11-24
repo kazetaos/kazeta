@@ -1,0 +1,49 @@
+# Build and install the kazeta bios. Install as root after building as yourself:
+#   task build && sudo task install
+# Packagers: task build PREFIX=/opt/kazeta && task install PREFIX=/opt/kazeta DESTDIR=pkgdir
+version: '3'
+
+vars:
+  PREFIX: '{{.PREFIX | default "/usr"}}'
+  DESTDIR: '{{.DESTDIR | default ""}}'
+  # the binary pkexec runs as the mount helper; built in, and named in the polkit rule
+  HELPER: '{{.PREFIX}}/bin/kazeta'
+  # polkit only reads rules from /usr/share and /etc, whatever the prefix
+  RULESDIR: '{{.RULESDIR | default "/usr/share/polkit-1/rules.d"}}'
+  # the bios looks for the "none" runtime at this fixed path
+  RUNTIMESDIR: /usr/share/kazeta/runtimes
+  BIN: bios/target/release/kazeta
+  RULE: 40-kazeta-mount.rules
+
+tasks:
+  build:
+    desc: Build the bios
+    dir: bios
+    env:
+      KAZETA_MOUNT_HELPER: '{{.HELPER}}'
+    cmds:
+      - cargo build --release
+
+  install:
+    desc: Install the bios, its mount helper polkit rule and the "none" runtime (as root, after build)
+    preconditions:
+      - sh: test -f {{.BIN}}
+        msg: Run `task build` first, as yourself, so the build is not owned by root
+    cmds:
+      - install -Dm755 {{.BIN}} "{{.DESTDIR}}{{.HELPER}}"
+      - install -Dm644 rootfs/usr/share/kazeta/runtimes/none.kzr "{{.DESTDIR}}{{.RUNTIMESDIR}}/none.kzr"
+      - mkdir -p "{{.DESTDIR}}{{.RULESDIR}}"
+      - sed 's,/usr/bin/kazeta,{{.HELPER}},g' rootfs/usr/share/polkit-1/rules.d/{{.RULE}} > "{{.DESTDIR}}{{.RULESDIR}}/{{.RULE}}"
+      - chmod 644 "{{.DESTDIR}}{{.RULESDIR}}/{{.RULE}}"
+
+  uninstall:
+    desc: Remove what install put in place (as root)
+    cmds:
+      - rm -f "{{.DESTDIR}}{{.HELPER}}" "{{.DESTDIR}}{{.RUNTIMESDIR}}/none.kzr" "{{.DESTDIR}}{{.RULESDIR}}/{{.RULE}}"
+      - rmdir --ignore-fail-on-non-empty "{{.DESTDIR}}{{.RUNTIMESDIR}}" "{{.DESTDIR}}/usr/share/kazeta" 2>/dev/null || true
+
+  install-user:
+    desc: Install the build where kazeta-session runs it instead of the system bios (mounting still uses the system one)
+    deps: [build]
+    cmds:
+      - install -Dm755 {{.BIN}} "${XDG_DATA_HOME:-$HOME/.local/share}/kazeta/bin/kazeta"
