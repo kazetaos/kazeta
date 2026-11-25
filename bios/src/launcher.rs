@@ -45,7 +45,8 @@ fn cart_env_file() -> PathBuf {
     runtime_dir().join("kazeta-cart-env")
 }
 
-/// Written by the bios UI with the path of the cart to launch once it exits
+/// Written by the bios UI with the carts to launch, one path per line: the base cart, then its
+/// DLC bottom to top
 pub fn boot_cart_file() -> PathBuf {
     runtime_dir().join("kazeta-boot-cart")
 }
@@ -126,11 +127,57 @@ pub fn find_carts() -> Vec<PathBuf> {
     carts
 }
 
-/// What the cart selection shows for a cart
+/// What the cart selection needs to know about a cart
+#[derive(Clone)]
 pub struct CartDetails {
     pub name: String,
     /// contents of the icon file, if the cart has one
     pub icon: Option<Vec<u8>>,
+    pub id: String,
+    /// for DLC, the id of the base game it extends
+    pub extends: Option<String>,
+    /// whether the cart has its own Exec; DLC with one is a game of its own
+    pub has_exec: bool,
+}
+
+/// The id of the base game in an `Extends` value, `<base game id>:<base game hash>`. The hash
+/// is only an annotation and is not checked, as hashing the base game would be too slow.
+fn extended_id(extends: &str) -> Option<String> {
+    let id = extends.split_once(':').map_or(extends, |(id, _)| id).trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// A game that can be started: a base cart and the DLC played with it
+pub struct LaunchEntry {
+    pub name: String,
+    pub icon: Option<Vec<u8>>,
+    /// the base cart first, then its DLC bottom to top; DLC with its own Exec, which is what
+    /// runs, comes last
+    pub carts: Vec<PathBuf>,
+}
+
+/// The games that can be started with the inserted carts. Each base game is played with all of
+/// its DLC that has no Exec of its own; DLC that has one is a separate game, played with the same
+/// DLC as its base game and on top of it. DLC whose base game is not inserted is left out.
+pub fn launch_entries(carts: &[(PathBuf, CartDetails)]) -> Vec<LaunchEntry> {
+    let mut entries = Vec::new();
+    for (base_path, base) in carts.iter().filter(|(_, cart)| cart.extends.is_none()) {
+        let dlc: Vec<&(PathBuf, CartDetails)> = carts.iter()
+            .filter(|(_, cart)| !base.id.trim().is_empty() && cart.extends.as_deref() == Some(base.id.trim()))
+            .collect();
+        let add_ons: Vec<PathBuf> = dlc.iter().filter(|(_, cart)| !cart.has_exec).map(|(path, _)| path.clone()).collect();
+        let base_carts: Vec<PathBuf> = std::iter::once(base_path.clone()).chain(add_ons).collect();
+
+        entries.push(LaunchEntry { name: base.name.clone(), icon: base.icon.clone(), carts: base_carts.clone() });
+        for (path, cart) in dlc.into_iter().filter(|(_, cart)| cart.has_exec) {
+            entries.push(LaunchEntry {
+                name: cart.name.clone(),
+                icon: cart.icon.clone().or_else(|| base.icon.clone()),
+                carts: base_carts.iter().cloned().chain([path.clone()]).collect(),
+            });
+        }
+    }
+    entries
 }
 
 /// Read the name and icon of a cart for display. A cart package is briefly mounted to read
@@ -147,7 +194,7 @@ pub fn cart_details(cart: &Path) -> CartDetails {
     } else {
         Some(read_cart_details(cart))
     }
-    .unwrap_or(CartDetails { name: String::new(), icon: None });
+    .unwrap_or(CartDetails { name: String::new(), icon: None, id: String::new(), extends: None, has_exec: false });
 
     if details.name.is_empty() {
         details.name = cart.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
@@ -180,7 +227,13 @@ fn read_cart_details(cart_info: &Path) -> CartDetails {
     } else {
         fs::read(cart_info.parent().unwrap_or(Path::new("/")).join(icon)).ok()
     };
-    CartDetails { name: attr("Name"), icon }
+    CartDetails {
+        name: attr("Name"),
+        icon,
+        id: attr("Id"),
+        extends: extended_id(&attr("Extends")),
+        has_exec: !attr("Exec").is_empty(),
+    }
 }
 
 /// Options gamescope needs at startup for the bios: the display menu's resolution and orientation
@@ -198,20 +251,22 @@ fn bios_runtime_options() -> RuntimeOptions {
 /// How often the running bios is checked for a cart it handed over
 const BIOS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// What the bios left behind: the cart to start, if any, and the bios itself when it is still
+/// What the bios left behind: the carts to start, if any, and the bios itself when it is still
 /// showing that the cart is starting
 struct BiosOutcome {
     status: i32,
-    cart: Option<PathBuf>,
+    carts: Option<Vec<PathBuf>>,
     bios: Option<RunningBios>,
 }
 
-/// Take the cart the bios handed over, if it did
-fn take_boot_cart() -> Option<PathBuf> {
+/// Take the carts the bios handed over, if it did: the base cart and its DLC
+fn take_boot_cart() -> Option<Vec<PathBuf>> {
     let boot_cart_file = boot_cart_file();
-    let cart = fs::read_to_string(&boot_cart_file).ok().map(|path| PathBuf::from(path.trim()));
+    let carts: Option<Vec<PathBuf>> = fs::read_to_string(&boot_cart_file).ok().map(|contents| {
+        contents.lines().map(str::trim).filter(|line| !line.is_empty()).map(PathBuf::from).collect()
+    });
     let _ = fs::remove_file(&boot_cart_file);
-    cart
+    carts.filter(|carts| !carts.is_empty())
 }
 
 /// Run the bios UI in the gamescope session until it hands over a cart or exits; `ignored_cart` is
@@ -230,42 +285,46 @@ fn run_bios(session: &Session, ignored_cart: Option<&Path>, stop: &dyn Fn() -> b
         Ok(child) => child,
         Err(e) => {
             eprintln!("Failed to start the bios: {}", e);
-            return BiosOutcome { status: 1, cart: None, bios: None };
+            return BiosOutcome { status: 1, carts: None, bios: None };
         }
     };
 
     loop {
         // the child has not been reaped yet, so its pid cannot have been reused
         if !matches!(child.try_wait(), Ok(None)) {
-            return BiosOutcome { status: 0, cart: take_boot_cart(), bios: None };
+            return BiosOutcome { status: 0, carts: take_boot_cart(), bios: None };
         }
         // it keeps running, showing that the game is starting, until the game shows a window
-        if let Some(cart) = take_boot_cart() {
-            return BiosOutcome { status: 0, cart: Some(cart), bios: Some(RunningBios(child)) };
+        if let Some(carts) = take_boot_cart() {
+            return BiosOutcome { status: 0, carts: Some(carts), bios: Some(RunningBios(child)) };
         }
         if stop() {
             drop(RunningBios(child));
-            return BiosOutcome { status: 0, cart: None, bios: None };
+            return BiosOutcome { status: 0, carts: None, bios: None };
         }
         thread::sleep(BIOS_POLL_INTERVAL);
     }
 }
 
-/// Resolve the runtime file for a cart, falling back to the "none" runtime. Looked for next to the
-/// cart, then in the kazeta/runtimes directory and at the root of the external media the cart is on,
-/// then in the runtimes directory of Kazeta's data directory (~/.local/share/kazeta/runtimes).
+/// Resolve the runtime file for a cart, falling back to the "none" runtime. For each of
+/// `media_paths` in turn, looked for in it, then in the kazeta/runtimes directory and at the root
+/// of the external media it is on; then in the runtimes directory of Kazeta's data directory
+/// (~/.local/share/kazeta/runtimes).
 /// A runtime found on external media is loaded from the data directory instead when it has a file
 /// of the same name there, i.e. the same version, as the internal drive is faster to load from.
-fn find_runtime(media_path: &Path, runtime_name: &str) -> PathBuf {
+fn find_runtime(media_paths: &[&Path], runtime_name: &str) -> PathBuf {
     if runtime_name.is_empty() {
         return PathBuf::from(NONE_RUNTIME);
     }
 
     let internal_dir = save::get_kazeta_data_dir().join("runtimes");
-    let mut dirs = vec![media_path.to_path_buf()];
-    if let Some(root) = media_root_of(media_path) {
-        dirs.push(root.join(MEDIA_RUNTIMES_DIR));
-        dirs.push(root);
+    let mut dirs = Vec::new();
+    for media_path in media_paths {
+        dirs.push(media_path.to_path_buf());
+        if let Some(root) = media_root_of(media_path) {
+            dirs.push(root.join(MEDIA_RUNTIMES_DIR));
+            dirs.push(root);
+        }
     }
     let mut seen = Vec::new();
     for dir in dirs {
@@ -347,7 +406,8 @@ impl PlaytimeCapture {
 
 /// Unmounts and tidies up after a cart, also when the launcher bails out early
 struct CartCleanup {
-    pkg_mounted: bool,
+    /// cart and DLC packages
+    pkg_slots: Vec<Slot>,
     cart_mounted: bool,
     upper: Option<PathBuf>,
 }
@@ -359,9 +419,7 @@ impl Drop for CartCleanup {
         if self.cart_mounted {
             slots.extend([Slot::Cart, Slot::Runtime]);
         }
-        if self.pkg_mounted {
-            slots.push(Slot::Pkg);
-        }
+        slots.extend(self.pkg_slots.iter().rev());
         mount::unmount(&slots);
         if let Some(upper) = &self.upper {
             let _ = fs::remove_dir_all(upper.join(".kazeta/share"));
@@ -371,7 +429,8 @@ impl Drop for CartCleanup {
     }
 }
 
-pub fn run(cart_arg: Option<&str>) -> i32 {
+/// Run the carts given, a base cart followed by its DLC bottom to top, or the bios when none are
+pub fn run(cart_args: &[String]) -> i32 {
     let terminated = signals::install();
 
     let base_dir = save::get_kazeta_data_dir();
@@ -379,19 +438,22 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
         eprintln!("Failed to create {}: {}", base_dir.display(), e);
     }
 
-    if let Some(arg) = cart_arg {
-        if !arg.ends_with(".kzi") && !arg.ends_with(".kzp") {
-            eprintln!("Not a cart: {} (expected a .kzi or .kzp file)", arg);
-            return 1;
-        }
-        let cart = match fs::canonicalize(arg) {
-            Ok(cart) => cart,
-            Err(e) => {
-                eprintln!("Cart {} not found: {}", arg, e);
+    if !cart_args.is_empty() {
+        let mut carts = Vec::new();
+        for arg in cart_args {
+            if !arg.ends_with(".kzi") && !arg.ends_with(".kzp") {
+                eprintln!("Not a cart: {} (expected a .kzi or .kzp file)", arg);
                 return 1;
             }
-        };
-        return run_cart(cart, &base_dir, &mut None, None, &|| terminated.get());
+            match fs::canonicalize(arg) {
+                Ok(cart) => carts.push(cart),
+                Err(e) => {
+                    eprintln!("Cart {} not found: {}", arg, e);
+                    return 1;
+                }
+            }
+        }
+        return run_cart(carts, &base_dir, &mut None, None, &|| terminated.get());
     }
 
     volume::watch();
@@ -426,7 +488,7 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
 
         // the bios waits for a cart and leaves its path behind when one should be launched
         let _ = fs::remove_file(boot_cart_file());
-        let BiosOutcome { status, cart, bios } = run_bios(bios_session, last_cart.as_deref(), &stop);
+        let BiosOutcome { status, carts, bios } = run_bios(bios_session, last_cart.as_deref(), &stop);
 
         if terminated.get() {
             return 1;
@@ -435,12 +497,14 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
             eprintln!("Power button pressed in the bios, shutting down");
             return 0;
         }
-        let Some(cart) = cart else {
+        let Some(carts) = carts else {
             return status;
         };
+        // the base cart, whose media counts as removed until it is
+        let cart = carts[0].clone();
 
         // a power button press stops the game and brings us back to the bios
-        let status = run_cart(cart.clone(), &base_dir, &mut session, bios, &stop);
+        let status = run_cart(carts, &base_dir, &mut session, bios, &stop);
         eprintln!("Game exited with status {}", status);
         if terminated.get() {
             return 1;
@@ -449,42 +513,113 @@ pub fn run(cart_arg: Option<&str>) -> i32 {
     }
 }
 
-/// Mount and run a cart until the game exits or `stop` returns true. The game runs in `session` when
+/// A cart or DLC being played
+struct Layer {
+    /// its cart info file
+    info: PathBuf,
+    /// the directory with its files
+    dir: PathBuf,
+    /// where it was found, to look for its runtime
+    media_path: PathBuf,
+}
+
+impl Layer {
+    fn attr(&self, name: &str) -> String {
+        save::get_attribute(&self.info, name).unwrap_or_default()
+    }
+}
+
+/// Mount and run a cart until the game exits or `stop` returns true. `carts` is the base cart
+/// followed by its DLC bottom to top, which is mounted on top of it; DLC last in line with its own
+/// Exec is what runs, with its own save data if it has its own Id. Otherwise DLC without Exec but
+/// with its own Id gets its own save data, and the game is not started when there are several of
+/// those. The game runs in `session` when
 /// its gamescope options allow it, otherwise the session is stopped for a gamescope of the game's own.
 /// `bios` stays on screen until the game shows a window, and is stopped if the game is not started.
-fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios: Option<RunningBios>, stop: &dyn Fn() -> bool) -> i32 {
-    if stop() {
+fn run_cart(carts: Vec<PathBuf>, base_dir: &Path, session: &mut Option<Session>, bios: Option<RunningBios>, stop: &dyn Fn() -> bool) -> i32 {
+    if stop() || carts.is_empty() {
         return 1;
     }
-    let is_pkg = cart.extension().is_some_and(|ext| ext == "kzp");
+    if carts.len() > mount::MAX_DLC + 1 {
+        eprintln!("Too many DLC, at most {} can be played at once", mount::MAX_DLC);
+        return 1;
+    }
+    let is_pkg = |cart: &Path| cart.extension().is_some_and(|ext| ext == "kzp");
 
-    let mut cleanup = CartCleanup { pkg_mounted: false, cart_mounted: false, upper: None };
+    let mut cleanup = CartCleanup { pkg_slots: Vec::new(), cart_mounted: false, upper: None };
 
-    let (cart_info, cart_path, media_path) = if is_pkg {
-        let cart_pkg = cart;
+    // packages are mounted in one go, as each helper run goes through pkexec
+    let pkgs: Vec<(Slot, &Path)> = carts.iter().enumerate()
+        .filter(|(_, cart)| is_pkg(cart))
+        .map(|(i, cart)| (if i == 0 { Slot::Pkg } else { Slot::Dlc(i - 1) }, cart.as_path()))
+        .collect();
+    if !pkgs.is_empty() {
         // unmounted by the cleanup even when mounting fails, in case it got partway
-        cleanup.pkg_mounted = true;
-        let Some(cart_path) = mount::mount_pkg(Slot::Pkg, &cart_pkg) else {
-            eprintln!("Failed to mount {}", cart_pkg.display());
+        cleanup.pkg_slots = pkgs.iter().map(|(slot, _)| *slot).collect();
+        if !mount::mount_pkgs(&pkgs) {
+            eprintln!("Failed to mount {:?}", pkgs.iter().map(|(_, pkg)| pkg).collect::<Vec<_>>());
             return 1;
+        }
+    }
+
+    let mut layers: Vec<Layer> = Vec::new();
+    for (i, cart) in carts.iter().enumerate() {
+        let layer = if is_pkg(cart) {
+            let dir = if i == 0 { Slot::Pkg } else { Slot::Dlc(i - 1) }.path();
+            let Some(info) = find_cart_file(&dir, "kzi") else {
+                eprintln!("No cart info found in {}", cart.display());
+                return 1;
+            };
+            Layer { info, dir, media_path: cart.parent().unwrap_or(Path::new("/")).to_path_buf() }
+        } else {
+            let dir = cart.parent().unwrap_or(Path::new("/")).to_path_buf();
+            Layer { info: cart.clone(), dir: dir.clone(), media_path: dir }
         };
-        let Some(cart_info) = find_cart_file(&cart_path, "kzi") else {
-            eprintln!("No cart info found in {}", cart_pkg.display());
-            return 1;
-        };
-        let media_path = cart_pkg.parent().unwrap_or(Path::new("/")).to_path_buf();
-        (cart_info, cart_path, media_path)
-    } else {
-        let cart_info = cart;
-        let cart_path = cart_info.parent().unwrap_or(Path::new("/")).to_path_buf();
-        (cart_info.clone(), cart_path.clone(), cart_path)
+        layers.push(layer);
+    }
+    let base = &layers[0];
+    let dlc = &layers[1..];
+    // DLC with its own Exec runs instead of the base game, and changes what it sets
+    let game = dlc.last().filter(|layer| !layer.attr("Exec").is_empty()).unwrap_or(base);
+    let attr = |name: &str| match game.attr(name) {
+        value if value.is_empty() => base.attr(name),
+        value => value,
     };
+    for layer in dlc {
+        eprintln!("Playing {} with DLC {}", base.info.display(), layer.info.display());
+    }
 
-    let attr = |name: &str| save::get_attribute(&cart_info, name).unwrap_or_default();
-    let cart_id = attr("Id");
-    cache_cart_info(&cart_info, &cart_path);
+    // DLC with its own Id gets save data of its own: the DLC that runs, otherwise the one DLC
+    // without Exec that has one; several of those cannot share one save directory
+    let saves_with: Vec<&Layer> = dlc.iter()
+        .filter(|layer| layer.attr("Exec").is_empty() && !layer.attr("Id").is_empty())
+        .collect();
+    let saves_with = if !std::ptr::eq(game, base) && !game.attr("Id").is_empty() {
+        game
+    } else {
+        match saves_with.as_slice() {
+            [] => base,
+            [layer] => layer,
+            layers => {
+                eprintln!("Not starting {}: several DLC have an Id of their own, and so their own save data: {}",
+                    base.info.display(),
+                    layers.iter().map(|layer| layer.info.display().to_string()).collect::<Vec<_>>().join(", "));
+                return 1;
+            }
+        }
+    };
+    let cart_id = saves_with.attr("Id");
+    cache_cart_info(&saves_with.info, &saves_with.dir);
 
-    let lower = cart_path.clone();
+    let lower = base.dir.clone();
+    // a cart directory with both the game's and the DLC's cart info holds the files of both, and
+    // is mounted once
+    let mut dlc_dirs: Vec<&Path> = Vec::new();
+    for layer in dlc {
+        if layer.dir != lower && !dlc_dirs.contains(&layer.dir.as_path()) {
+            dlc_dirs.push(&layer.dir);
+        }
+    }
     let upper = base_dir.join("saves/default").join(&cart_id);
     // overlayfs' work directory; the mount helper needs it to be the user's. The old kazeta-mount
     // script created run/ as root: Kazeta OS removes it at boot (tmpfiles.d/kazeta.conf), elsewhere
@@ -496,11 +631,11 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
         let _ = fs::create_dir_all(&upper);
     }
 
-    let runtime = find_runtime(&media_path, &attr("Runtime"));
+    let runtime = find_runtime(&[game.media_path.as_path(), base.media_path.as_path()], &attr("Runtime"));
 
     cleanup.cart_mounted = true;
     cleanup.upper = Some(upper.clone());
-    let Some(target) = mount::mount_cart(&lower, &upper, &work, &runtime) else {
+    let Some(target) = mount::mount_cart(&lower, &dlc_dirs, &upper, &work, &runtime) else {
         eprintln!("Failed to mount cart {}", cart_id);
         return 1;
     };
@@ -518,7 +653,10 @@ fn run_cart(cart: PathBuf, base_dir: &Path, session: &mut Option<Session>, bios:
     let cart_exec_file = cart_exec_file();
     let _ = fs::write(&cart_exec_file, format!("{}\n", cart_exec));
     // environment variables the runtime sets for the game (Linux) or for Proton (Windows), not gamescope
-    let cart_env = save::get_attributes(&cart_info, "Env").unwrap_or_default();
+    let cart_env = match save::get_attributes(&game.info, "Env").unwrap_or_default() {
+        env if env.is_empty() => save::get_attributes(&base.info, "Env").unwrap_or_default(),
+        env => env,
+    };
     let cart_env_file = cart_env_file();
     let _ = fs::remove_file(&cart_env_file);
     let cart_env_file = if cart_env.is_empty() {
@@ -695,5 +833,63 @@ fn wait_game(game: &Game, child: io::Result<std::process::Child>, stop: &dyn Fn(
     match status {
         Ok(status) => status.code().unwrap_or(1),
         Err(_) => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cart(id: &str, extends: Option<&str>, has_exec: bool) -> CartDetails {
+        CartDetails {
+            name: id.to_string(),
+            icon: None,
+            id: id.to_string(),
+            extends: extends.and_then(extended_id),
+            has_exec,
+        }
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn reads_the_base_game_id_from_extends() {
+        assert_eq!(extended_id("game:abc123").as_deref(), Some("game"));
+        assert_eq!(extended_id(" game ").as_deref(), Some("game"));
+        assert_eq!(extended_id(""), None);
+        assert_eq!(extended_id(":abc123"), None);
+    }
+
+    #[test]
+    fn plays_dlc_with_its_base_game() {
+        let carts = vec![
+            (PathBuf::from("game.kzp"), cart("game", None, true)),
+            (PathBuf::from("dlc1.kzp"), cart("", Some("game:hash"), false)),
+            (PathBuf::from("expansion.kzp"), cart("expansion", Some("game:hash"), true)),
+            (PathBuf::from("dlc2.kzp"), cart("dlc2", Some("game:hash"), false)),
+            (PathBuf::from("orphan.kzp"), cart("", Some("missing:hash"), true)),
+            (PathBuf::from("other.kzp"), cart("other", None, true)),
+        ];
+        let entries = launch_entries(&carts);
+        let carts: Vec<Vec<PathBuf>> = entries.iter().map(|entry| entry.carts.clone()).collect();
+        assert_eq!(carts, vec![
+            paths(&["game.kzp", "dlc1.kzp", "dlc2.kzp"]),
+            paths(&["game.kzp", "dlc1.kzp", "dlc2.kzp", "expansion.kzp"]),
+            paths(&["other.kzp"]),
+        ]);
+        assert_eq!(entries[1].name, "expansion");
+    }
+
+    #[test]
+    fn base_game_without_id_has_no_dlc() {
+        let carts = vec![
+            (PathBuf::from("game.kzp"), cart("", None, true)),
+            (PathBuf::from("dlc.kzp"), cart("", Some(""), false)),
+        ];
+        let carts: Vec<Vec<PathBuf>> = launch_entries(&carts).into_iter().map(|entry| entry.carts).collect();
+        // an empty Extends is not DLC
+        assert_eq!(carts, vec![paths(&["game.kzp"]), paths(&["dlc.kzp"])]);
     }
 }

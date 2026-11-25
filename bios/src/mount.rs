@@ -37,6 +37,9 @@ const HELPER: &str = match option_env!("KAZETA_MOUNT_HELPER") {
 
 const MOUNT_ROOT: &str = "/run/kazeta";
 
+/// The most DLC packages a cart can be played with
+pub const MAX_DLC: usize = 64;
+
 /// The helper's mount points, under /run/kazeta/<uid>
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Slot {
@@ -44,26 +47,34 @@ pub enum Slot {
     Preview,
     /// the cart package being played
     Pkg,
+    /// a DLC package of the cart being played, numbered from 0 up to MAX_DLC
+    Dlc(usize),
     /// the runtime of the cart being played
     Runtime,
-    /// the overlay the cart is played from: the cart and runtime, with the save data on top
+    /// the overlay the cart is played from: the cart, its DLC and runtime, with the save data on top
     Cart,
 }
 
 impl Slot {
-    const ALL: [Slot; 4] = [Slot::Preview, Slot::Pkg, Slot::Runtime, Slot::Cart];
+    const FIXED: [Slot; 4] = [Slot::Preview, Slot::Pkg, Slot::Runtime, Slot::Cart];
 
-    fn name(self) -> &'static str {
+    fn name(self) -> String {
         match self {
-            Slot::Preview => "preview",
-            Slot::Pkg => "pkg",
-            Slot::Runtime => "runtime",
-            Slot::Cart => "cart",
+            Slot::Preview => "preview".to_string(),
+            Slot::Pkg => "pkg".to_string(),
+            Slot::Dlc(index) => format!("dlc{}", index),
+            Slot::Runtime => "runtime".to_string(),
+            Slot::Cart => "cart".to_string(),
         }
     }
 
     fn from_name(name: &str) -> Option<Slot> {
-        Slot::ALL.into_iter().find(|slot| slot.name() == name)
+        if let Some(index) = name.strip_prefix("dlc") {
+            // only the canonical spelling, so each slot has one name
+            let index: usize = index.parse().ok()?;
+            return (index < MAX_DLC && Slot::Dlc(index).name() == name).then_some(Slot::Dlc(index));
+        }
+        Slot::FIXED.into_iter().find(|slot| slot.name() == name)
     }
 
     fn path_for(self, uid: u32) -> PathBuf {
@@ -93,18 +104,31 @@ fn run_helper(args: &[&OsStr]) -> bool {
 
 /// Mount a cart package read-only on `slot` (Preview or Pkg), returning where it is mounted
 pub fn mount_pkg(slot: Slot, pkg: &Path) -> Option<PathBuf> {
-    run_helper(&["mount-pkg".as_ref(), slot.name().as_ref(), pkg.as_os_str()]).then(|| slot.path())
+    mount_pkgs(&[(slot, pkg)]).then(|| slot.path())
 }
 
-/// Mount `runtime` and an overlay of the cart in `lower` and the runtime, with the save data in
-/// `upper` on top, returning where the cart is mounted. `work` is created if missing, and must be
-/// on the same filesystem as `upper`.
-pub fn mount_cart(lower: &Path, upper: &Path, work: &Path, runtime: &Path) -> Option<PathBuf> {
+/// Mount cart packages read-only on their slots (Preview, Pkg or Dlc) in one go
+pub fn mount_pkgs(pkgs: &[(Slot, &Path)]) -> bool {
+    let names: Vec<String> = pkgs.iter().map(|(slot, _)| slot.name()).collect();
+    let mut args: Vec<&OsStr> = vec!["mount-pkg".as_ref()];
+    for ((_, pkg), name) in pkgs.iter().zip(&names) {
+        args.push(name.as_ref());
+        args.push(pkg.as_os_str());
+    }
+    run_helper(&args)
+}
+
+/// Mount `runtime` and an overlay of the cart in `lower`, its DLC in `dlc` (bottom to top) on top
+/// of it and the runtime below it, with the save data in `upper` on top of all, returning where the
+/// cart is mounted. `work` is created if missing, and must be on the same filesystem as `upper`.
+pub fn mount_cart(lower: &Path, dlc: &[&Path], upper: &Path, work: &Path, runtime: &Path) -> Option<PathBuf> {
     if let Err(e) = fs::create_dir_all(work) {
         eprintln!("Failed to create {}: {}", work.display(), e);
         return None;
     }
-    let args = ["mount-cart".as_ref(), lower.as_os_str(), upper.as_os_str(), work.as_os_str(), runtime.as_os_str()];
+    // without DLC this is the form older helpers understand too
+    let mut args: Vec<&OsStr> = vec!["mount-cart".as_ref(), lower.as_os_str(), upper.as_os_str(), work.as_os_str(), runtime.as_os_str()];
+    args.extend(dlc.iter().map(|dir| dir.as_os_str()));
     run_helper(&args).then(|| Slot::Cart.path())
 }
 
@@ -113,8 +137,9 @@ pub fn unmount(slots: &[Slot]) {
     if slots.is_empty() {
         return;
     }
+    let names: Vec<String> = slots.iter().map(|slot| slot.name()).collect();
     let mut args: Vec<&OsStr> = vec!["unmount".as_ref()];
-    args.extend(slots.iter().map(|slot| OsStr::new(slot.name())));
+    args.extend(names.iter().map(OsStr::new));
     run_helper(&args);
 }
 
@@ -142,32 +167,46 @@ fn helper(args: &[String]) -> io::Result<()> {
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        ["mount-pkg", slot, pkg] => {
-            let slot = Slot::from_name(slot).filter(|slot| matches!(slot, Slot::Preview | Slot::Pkg))
-                .ok_or_else(|| error("cart packages are only mounted on preview or pkg"))?;
-            let pkg = user.as_user(|| open_image(Path::new(pkg)))?;
-            let target = prepare_mount_point(uid, slot)?;
-            mount_image(&pkg, &target)
+        // one or more slot and image pairs
+        ["mount-pkg", pairs @ ..] if !pairs.is_empty() && pairs.len() % 2 == 0 && pairs.len() <= 2 * (MAX_DLC + 1) => {
+            let pkgs = pairs.chunks(2)
+                .map(|pair| {
+                    let slot = Slot::from_name(pair[0]).filter(|slot| matches!(slot, Slot::Preview | Slot::Pkg | Slot::Dlc(_)))
+                        .ok_or_else(|| error("cart packages are only mounted on preview, pkg or dlc<n>"))?;
+                    Ok((slot, pair[1]))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            let images = user.as_user(|| pkgs.iter().map(|(_, pkg)| open_image(Path::new(pkg))).collect::<io::Result<Vec<_>>>())?;
+            for ((slot, _), image) in pkgs.iter().zip(&images) {
+                let target = prepare_mount_point(uid, *slot)?;
+                mount_image(image, &target)?;
+            }
+            Ok(())
         }
-        ["mount-cart", lower, upper, work, runtime] => {
-            let (lower, upper, work, runtime) = user.as_user(|| {
+        // DLC directories after the runtime, bottom to top
+        ["mount-cart", lower, upper, work, runtime, dlc @ ..] if dlc.len() <= MAX_DLC => {
+            let (lower, upper, work, runtime, dlc) = user.as_user(|| {
                 Ok((
                     open_dir(Path::new(lower), None)?,
                     open_dir(Path::new(upper), Some(uid))?,
                     open_dir(Path::new(work), Some(uid))?,
                     open_image(Path::new(runtime))?,
+                    dlc.iter().map(|dir| open_dir(Path::new(dir), None)).collect::<io::Result<Vec<_>>>()?,
                 ))
             })?;
             let runtime_dir = prepare_mount_point(uid, Slot::Runtime)?;
             let target = prepare_mount_point(uid, Slot::Cart)?;
             mount_image(&runtime, &runtime_dir)?;
 
+            // overlayfs puts the first lower directory on top
+            let lowers: Vec<String> = dlc.iter().rev().chain([&lower]).map(fd_path)
+                .chain([runtime_dir.display().to_string()])
+                .collect();
             // metacopy=on reduces the pressure vessel writes
             // xino=off fixes 32-bit applications crashing
             let options = format!(
-                "lowerdir={}:{},upperdir={},workdir={},metacopy=on,xino=off",
-                fd_path(&lower),
-                runtime_dir.display(),
+                "lowerdir={},upperdir={},workdir={},metacopy=on,xino=off",
+                lowers.join(":"),
                 fd_path(&upper),
                 fd_path(&work),
             );
@@ -189,7 +228,7 @@ fn helper(args: &[String]) -> io::Result<()> {
             }
             result
         }
-        _ => Err(error("usage: kazeta --mount-helper mount-pkg <preview|pkg> <image> | mount-cart <lower> <upper> <work> <runtime> | unmount <slot>...")),
+        _ => Err(error("usage: kazeta --mount-helper mount-pkg <preview|pkg|dlc<n>> <image> [<slot> <image>...] | mount-cart <lower> <upper> <work> <runtime> [<dlc>...] | unmount <slot>...")),
     }
 }
 
@@ -369,9 +408,13 @@ mod tests {
 
     #[test]
     fn slot_names_round_trip() {
-        for slot in Slot::ALL {
-            assert_eq!(Slot::from_name(slot.name()), Some(slot));
+        for slot in Slot::FIXED.into_iter().chain([Slot::Dlc(0), Slot::Dlc(MAX_DLC - 1)]) {
+            assert_eq!(Slot::from_name(&slot.name()), Some(slot));
         }
         assert_eq!(Slot::from_name("../etc"), None);
+        assert_eq!(Slot::from_name(&format!("dlc{}", MAX_DLC)), None);
+        assert_eq!(Slot::from_name("dlc01"), None);
+        assert_eq!(Slot::from_name("dlc+1"), None);
+        assert_eq!(Slot::from_name("dlc"), None);
     }
 }

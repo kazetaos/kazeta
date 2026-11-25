@@ -140,9 +140,13 @@ enum Screen {
     FadingOut,
 }
 
+/// A game that can be started with the inserted carts
 #[derive(Clone)]
 struct InsertedCart {
+    /// identifies the game: the cart that runs, the base cart or DLC with its own Exec
     path: std::path::PathBuf,
+    /// the base cart, then its DLC bottom to top
+    carts: Vec<std::path::PathBuf>,
     name: String,
     // decoded off the main thread, the texture is created when it is first drawn
     icon: Option<Arc<Image>>,
@@ -1322,13 +1326,14 @@ fn render_display_menu(
     }
 }
 
-/// Hand a cart to the launcher, which starts it while the bios shows that it is starting, and
-/// stops the bios once the game shows a window
-fn hand_over_cart(cart: &std::path::Path) -> bool {
+/// Hand a game's carts to the launcher, which starts it while the bios shows that it is starting,
+/// and stops the bios once the game shows a window
+fn hand_over_cart(cart: &InsertedCart) -> bool {
     let boot_cart_file = launcher::boot_cart_file();
     // written in one go, as the launcher picks it up while the bios is running
     let tmp = boot_cart_file.with_extension("tmp");
-    match fs::write(&tmp, cart.to_string_lossy().as_bytes()).and_then(|_| fs::rename(&tmp, &boot_cart_file)) {
+    let contents: String = cart.carts.iter().map(|path| format!("{}\n", path.to_string_lossy())).collect();
+    match fs::write(&tmp, contents.as_bytes()).and_then(|_| fs::rename(&tmp, &boot_cart_file)) {
         Ok(_) => true,
         Err(e) => {
             eprintln!("Failed to write {}: {}", boot_cart_file.display(), e);
@@ -1540,8 +1545,8 @@ fn main() {
         Some(session::HOLD_ARG) => process::exit(args.get(2).map_or(1, |file| session::hold(file))),
         // run as root by pkexec to mount and unmount carts, see mount.rs
         Some(mount::HELPER_ARG) => process::exit(mount::helper_main(&args[2..])),
-        // run the given cart, or the bios which waits for one
-        cart => process::exit(launcher::run(cart)),
+        // run the given cart and its DLC, or the bios which waits for one
+        _ => process::exit(launcher::run(&args[1..])),
     }
 }
 
@@ -1609,7 +1614,9 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
         let available_updates = available_updates.clone();
         let cart_watch = cart_watch.clone();
         let mut ignored_cart = ignored_cart;
-        let mut known_carts: Vec<InsertedCart> = Vec::new();
+        let mut known_paths: Vec<std::path::PathBuf> = Vec::new();
+        // cart details by path, so only newly inserted carts are read
+        let mut known_details: HashMap<std::path::PathBuf, launcher::CartDetails> = HashMap::new();
         thread::spawn(move || loop {
             let mut paths = Vec::new();
             if cart_watch.load(Ordering::Relaxed) {
@@ -1626,18 +1633,27 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                 }
             }
             // only read cart info when the carts change, which may be slow on optical media
-            if paths.len() != known_carts.len() || paths.iter().zip(&known_carts).any(|(path, cart)| *path != cart.path) {
-                known_carts = paths.into_iter()
+            if paths != known_paths {
+                known_details.retain(|path, _| paths.contains(path));
+                let details: Vec<(std::path::PathBuf, launcher::CartDetails)> = paths.iter()
                     .map(|path| {
-                        let details = launcher::cart_details(&path);
-                        let icon = details.icon
-                            .and_then(|bytes| Image::from_file_with_format(&bytes, None).ok())
-                            .map(Arc::new);
-                        InsertedCart { name: details.name, icon, path }
+                        let details = known_details.entry(path.clone()).or_insert_with(|| launcher::cart_details(path));
+                        (path.clone(), details.clone())
                     })
                     .collect();
+                // DLC is played with its base game, or is a game of its own when it has its own Exec
+                let games: Vec<InsertedCart> = launcher::launch_entries(&details).into_iter()
+                    .map(|entry| {
+                        let icon = entry.icon
+                            .and_then(|bytes| Image::from_file_with_format(&bytes, None).ok())
+                            .map(Arc::new);
+                        let path = entry.carts.last().cloned().unwrap_or_default();
+                        InsertedCart { path, carts: entry.carts, name: entry.name, icon }
+                    })
+                    .collect();
+                known_paths = paths;
                 if let Ok(mut inserted) = inserted_carts.lock() {
-                    *inserted = known_carts.clone();
+                    *inserted = games;
                 }
             }
             thread::sleep(time::Duration::from_millis(250));
@@ -1827,7 +1843,7 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                         update_status = None;
                         current_screen = Screen::Update;
                     } else if carts.len() == 1 {
-                        if hand_over_cart(&carts[0].path) {
+                        if hand_over_cart(&carts[0]) {
                             sound_effects.play_select();
                             fade_start_time = Some(get_time());
                             current_screen = Screen::FadingOut;
@@ -1934,7 +1950,7 @@ async fn bios_main(ignored_cart: Option<std::path::PathBuf>) {
                         animation_state.trigger_transition();
                         sound_effects.play_cursor_move();
                     }
-                    if (input_state.select || input_state.start) && hand_over_cart(&cart_select_list[cart_selection].path) {
+                    if (input_state.select || input_state.start) && hand_over_cart(&cart_select_list[cart_selection]) {
                         sound_effects.play_select();
                         cart_select_leaving = true;
                         cart_chosen = true;
