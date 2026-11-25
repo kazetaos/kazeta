@@ -83,13 +83,44 @@ fn find_cart_file(dir: &Path, extension: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Find all inserted carts, cart packages first
+/// Directory on external media, relative to its root, that holds additional carts
+const MEDIA_CONTENT_DIR: &str = "kazeta/content";
+/// Directory on external media, relative to its root, that holds additional runtimes
+const MEDIA_RUNTIMES_DIR: &str = "kazeta/runtimes";
+
+/// Root directories of all mounted external media
+fn media_roots(base_ext: &Path) -> Vec<PathBuf> {
+    fs::read_dir(base_ext)
+        .map(|entries| entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default()
+}
+
+/// The root of the external media `path` is on, if it is on any
+fn media_root_of(path: &Path) -> Option<PathBuf> {
+    let base_ext = PathBuf::from(save::get_external_media_dir());
+    let relative = path.strip_prefix(&base_ext).ok()?;
+    let first = relative.components().next()?;
+    let root = base_ext.join(first);
+    root.is_dir().then_some(root)
+}
+
+/// Find all inserted carts, cart packages first: at the root of external media and in its
+/// kazeta/content directory, both including their immediate subdirectories
 pub fn find_carts() -> Vec<PathBuf> {
     let base_ext = PathBuf::from(save::get_external_media_dir());
+    let content_dirs: Vec<PathBuf> = media_roots(&base_ext)
+        .into_iter()
+        .map(|root| root.join(MEDIA_CONTENT_DIR))
+        .filter(|dir| dir.is_dir())
+        .collect();
     let mut carts = Vec::new();
     for extension in ["kzp", "kzi"] {
         let mut files = save::find_files_by_extension(&base_ext, extension, 1, false).unwrap_or_default();
+        for dir in &content_dirs {
+            files.extend(save::find_files_by_extension(dir, extension, 1, false).unwrap_or_default());
+        }
         files.sort();
+        files.dedup();
         carts.extend(files);
     }
     carts
@@ -220,25 +251,47 @@ fn run_bios(session: &Session, ignored_cart: Option<&Path>, stop: &dyn Fn() -> b
     }
 }
 
-/// Resolve the runtime file for a cart, falling back to the "none" runtime
+/// Resolve the runtime file for a cart, falling back to the "none" runtime. Looked for next to the
+/// cart, then at the root and in the kazeta/runtimes directory of the external media the cart is on.
 fn find_runtime(media_path: &Path, runtime_name: &str) -> PathBuf {
     if runtime_name.is_empty() {
         return PathBuf::from(NONE_RUNTIME);
     }
 
-    let exact = media_path.join(runtime_name);
-    if exact.is_file() {
-        return exact;
+    let mut dirs = vec![media_path.to_path_buf()];
+    if let Some(root) = media_root_of(media_path) {
+        dirs.push(root.join(MEDIA_RUNTIMES_DIR));
+        dirs.push(root);
+    }
+    let mut seen = Vec::new();
+    for dir in dirs {
+        if seen.contains(&dir) {
+            continue;
+        }
+        if let Some(runtime) = find_runtime_in(&dir, runtime_name) {
+            return runtime;
+        }
+        seen.push(dir);
     }
 
-    let with_ext = media_path.join(format!("{}.kzr", runtime_name));
+    PathBuf::from(NONE_RUNTIME)
+}
+
+/// Find the runtime named `runtime_name` in `dir`
+fn find_runtime_in(dir: &Path, runtime_name: &str) -> Option<PathBuf> {
+    let exact = dir.join(runtime_name);
+    if exact.is_file() {
+        return Some(exact);
+    }
+
+    let with_ext = dir.join(format!("{}.kzr", runtime_name));
     if with_ext.is_file() {
-        return with_ext;
+        return Some(with_ext);
     }
 
     // versioned runtime, e.g. name-1.0.kzr; only used if it is unambiguous
     let prefix = format!("{}-", runtime_name);
-    let matches: Vec<PathBuf> = fs::read_dir(media_path)
+    let mut matches: Vec<PathBuf> = fs::read_dir(dir)
         .map(|entries| {
             entries
                 .flatten()
@@ -251,10 +304,10 @@ fn find_runtime(media_path: &Path, runtime_name: &str) -> PathBuf {
         })
         .unwrap_or_default();
     if matches.len() == 1 {
-        return matches[0].clone();
+        return matches.pop();
     }
 
-    PathBuf::from(NONE_RUNTIME)
+    None
 }
 
 /// Periodically records the end of the current play session until stopped
