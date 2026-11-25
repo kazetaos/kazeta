@@ -252,12 +252,16 @@ fn run_bios(session: &Session, ignored_cart: Option<&Path>, stop: &dyn Fn() -> b
 }
 
 /// Resolve the runtime file for a cart, falling back to the "none" runtime. Looked for next to the
-/// cart, then at the root and in the kazeta/runtimes directory of the external media the cart is on.
+/// cart, then in the kazeta/runtimes directory and at the root of the external media the cart is on,
+/// then in the runtimes directory of Kazeta's data directory (~/.local/share/kazeta/runtimes).
+/// A runtime found on external media is loaded from the data directory instead when it has a file
+/// of the same name there, i.e. the same version, as the internal drive is faster to load from.
 fn find_runtime(media_path: &Path, runtime_name: &str) -> PathBuf {
     if runtime_name.is_empty() {
         return PathBuf::from(NONE_RUNTIME);
     }
 
+    let internal_dir = save::get_kazeta_data_dir().join("runtimes");
     let mut dirs = vec![media_path.to_path_buf()];
     if let Some(root) = media_root_of(media_path) {
         dirs.push(root.join(MEDIA_RUNTIMES_DIR));
@@ -269,12 +273,16 @@ fn find_runtime(media_path: &Path, runtime_name: &str) -> PathBuf {
             continue;
         }
         if let Some(runtime) = find_runtime_in(&dir, runtime_name) {
-            return runtime;
+            let internal = runtime.file_name().map(|name| internal_dir.join(name));
+            return match internal {
+                Some(internal) if internal.is_file() => internal,
+                _ => runtime,
+            };
         }
         seen.push(dir);
     }
 
-    PathBuf::from(NONE_RUNTIME)
+    find_runtime_in(&internal_dir, runtime_name).unwrap_or_else(|| PathBuf::from(NONE_RUNTIME))
 }
 
 /// Find the runtime named `runtime_name` in `dir`
