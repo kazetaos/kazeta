@@ -24,6 +24,12 @@ tasks:
     cmds:
       - cargo build --release
 
+  test:
+    desc: Run the bios tests (extra arguments go to cargo test, e.g. `task test -- merges`)
+    dir: bios
+    cmds:
+      - cargo test {{.CLI_ARGS}}
+
   install:
     desc: Install the bios, its mount helper polkit rule and the "none" runtime (as root, after build)
     preconditions:
