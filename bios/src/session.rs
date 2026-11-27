@@ -146,6 +146,122 @@ pub fn split_options(args: &[String]) -> (RuntimeOptions, Vec<String>) {
     (runtime, startup)
 }
 
+/// gamescope's options, from its getopt table (src/main.cpp): short name, long name, whether it
+/// takes a value. Options gamescope gets from Kazeta itself (--xwayland-count, --keep-alive,
+/// --ready-fd, ...) are listed too, so they are recognized
+const GAMESCOPE_OPTIONS: &[(Option<char>, &str, bool)] = &[
+    (Some('w'), "nested-width", true), (Some('h'), "nested-height", true), (Some('r'), "nested-refresh", true),
+    (Some('m'), "max-scale", true), (Some('S'), "scaler", true), (Some('F'), "filter", true),
+    (Some('W'), "output-width", true), (Some('H'), "output-height", true),
+    (None, "sharpness", true), (None, "fsr-sharpness", true), (None, "rt", false),
+    (None, "prefer-vk-device", true), (None, "expose-wayland", false), (Some('s'), "mouse-sensitivity", true),
+    (None, "mangoapp", false), (None, "adaptive-sync", false), (None, "backend", true),
+    (Some('o'), "nested-unfocused-refresh", true), (Some('b'), "borderless", false), (Some('f'), "fullscreen", false),
+    (Some('g'), "grab", false), (None, "force-grab-cursor", false), (None, "display-index", true),
+    (None, "disable-layers", false), (None, "debug-layers", false), (Some('O'), "prefer-output", true),
+    (None, "default-touch-mode", true), (None, "generate-drm-mode", true), (None, "immediate-flips", false),
+    (None, "framerate-limit", true), (None, "xwayland-count", true), (None, "xwayland-force-touch-pointer-emulation", false),
+    (None, "cursor", true), (None, "cursor-hotspot", true), (None, "cursor-scale-height", true),
+    (None, "virtual-connector-strategy", true), (Some('R'), "ready-fd", true), (Some('T'), "stats-path", true),
+    (Some('C'), "hide-cursor-delay", true), (None, "debug-focus", false), (None, "synchronous-x11", false),
+    (Some('v'), "debug-hud", false), (None, "debug-events", false), (Some('e'), "steam", false),
+    (Some('c'), "force-composition", false), (None, "composite-debug", false), (Some('x'), "disable-xres", false),
+    (None, "fade-out-duration", true), (None, "force-composition-rotation", false), (None, "force-orientation", true),
+    (None, "force-windows-fullscreen", false), (None, "disable-color-management", false),
+    (None, "sdr-gamut-wideness", true), (None, "hdr-enabled", false), (None, "hdr-sdr-content-nits", true),
+    (None, "hdr-itm-enabled", false), (None, "hdr-itm-sdr-nits", true), (None, "hdr-itm-target-nits", true),
+    (None, "hdr-debug-force-support", false), (None, "hdr-debug-force-output", false), (None, "hdr-debug-heatmap", false),
+    (None, "reshade-effect", true), (None, "reshade-technique-idx", true), (None, "mura-map", true),
+    (None, "allow-deferred-backend", false), (None, "keep-alive", false),
+];
+
+/// One gamescope option as written: `key` names it whatever its spelling (long name; aliases
+/// share one), None for anything not understood, which is kept as is and never merged
+struct GamescopeOption {
+    key: Option<String>,
+    args: Vec<String>,
+}
+
+fn option_key(long: &str) -> String {
+    // the same setting under two names
+    if long == "fsr-sharpness" { "sharpness".to_string() } else { long.to_string() }
+}
+
+/// Split gamescope options into options with their values, as gamescope's getopt reads them:
+/// `--name value`, `--name=value`, `-x value`, `-xvalue` and bundled flags (`-bf`). Unknown
+/// options are taken to have no value
+fn parse_options(args: &[String]) -> Vec<GamescopeOption> {
+    let mut options = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        i += 1;
+        if let Some(long) = arg.strip_prefix("--").filter(|long| !long.is_empty()) {
+            let (name, inline) = match long.split_once('=') {
+                Some((name, _)) => (name, true),
+                None => (long, false),
+            };
+            let known = GAMESCOPE_OPTIONS.iter().find(|(_, l, _)| *l == name);
+            let mut option_args = vec![arg.clone()];
+            if known.is_some_and(|(_, _, value)| *value) && !inline && i < args.len() {
+                option_args.push(args[i].clone());
+                i += 1;
+            }
+            // an unknown option might take a value, which is then a separate argument: not merged
+            options.push(GamescopeOption { key: known.map(|_| option_key(name)), args: option_args });
+        } else if let Some(shorts) = arg.strip_prefix('-').filter(|s| !s.is_empty() && !s.starts_with('-')) {
+            // each letter is a flag until one that takes a value, which gets the rest or the next argument
+            let mut chars = shorts.char_indices();
+            let mut letters = Vec::new();
+            while let Some((at, c)) = chars.next() {
+                let Some((_, long, value)) = GAMESCOPE_OPTIONS.iter().find(|(s, _, _)| *s == Some(c)) else {
+                    letters.clear();
+                    break;
+                };
+                if *value {
+                    let rest = &shorts[at + c.len_utf8()..];
+                    let mut option_args = vec![format!("-{}{}", c, rest)];
+                    if rest.is_empty() && i < args.len() {
+                        option_args.push(args[i].clone());
+                        i += 1;
+                    }
+                    letters.push(GamescopeOption { key: Some(option_key(long)), args: option_args });
+                    break;
+                }
+                letters.push(GamescopeOption { key: Some(option_key(long)), args: vec![format!("-{}", c)] });
+            }
+            if letters.is_empty() {
+                options.push(GamescopeOption { key: None, args: vec![arg.clone()] });
+            } else {
+                options.extend(letters);
+            }
+        } else {
+            options.push(GamescopeOption { key: None, args: vec![arg.clone()] });
+        }
+    }
+    options
+}
+
+/// Merge layers of gamescope options, bottom to top: an option a layer sets replaces the same
+/// option below it, where it was, whatever its spelling (`-F` and `--filter`); other options are
+/// added. A layer that replaces (`true`) drops everything below it first
+pub fn merge_options<'a>(layers: impl IntoIterator<Item = (&'a str, bool)>) -> Vec<String> {
+    let mut merged: Vec<GamescopeOption> = Vec::new();
+    for (layer, replace) in layers {
+        if replace {
+            merged.clear();
+        }
+        let args: Vec<String> = layer.split_whitespace().map(String::from).collect();
+        for option in parse_options(&args) {
+            match merged.iter_mut().find(|m| m.key.is_some() && m.key == option.key) {
+                Some(existing) => *existing = option,
+                None => merged.push(option),
+            }
+        }
+    }
+    merged.into_iter().flat_map(|option| option.args).collect()
+}
+
 /// gamescope's Xwayland server for games
 const GAME_SERVER: u32 = 1;
 
@@ -468,6 +584,30 @@ mod tests {
         let (runtime, startup) = split_options(&args("-w 640 -h 480 -F nearest --scaler=integer --sharpness 5 -W 1920 -H 1080 -r 30"));
         assert_eq!(runtime, RuntimeOptions { filter: Some(1), scaler: Some(1), sharpness: Some(5), size: Some((640, 480)) });
         assert_eq!(startup, args("-W 1920 -H 1080 -r 30"));
+    }
+
+    fn merge(layers: &[(&str, bool)]) -> String {
+        merge_options(layers.iter().copied()).join(" ")
+    }
+
+    #[test]
+    fn merges_options_by_name() {
+        assert_eq!(merge(&[("-W 1920 -H 1080", false), ("--filter pixel -S integer", false), ("-w 640 -h 480 -W 640 -H 480 --scaler=fit", false)]),
+            "-W 640 -H 480 --filter pixel --scaler=fit -w 640 -h 480");
+        // aliases and spellings
+        assert_eq!(merge(&[("--filter pixel --fsr-sharpness 3 --nested-width=1280", false), ("-Flinear --sharpness 5 -w 640", false)]),
+            "-Flinear --sharpness 5 -w 640");
+        // bundled flags, a flag set twice, unknown options are kept
+        assert_eq!(merge(&[("-bf -w640 --bogus -Q", false), ("-f --force-grab-cursor --bogus -Q", false)]),
+            "-b -f -w640 --bogus -Q --force-grab-cursor --bogus -Q");
+        assert_eq!(merge(&[("", false), ("", false)]), "");
+    }
+
+    #[test]
+    fn replacing_layer_drops_the_layers_below() {
+        assert_eq!(merge(&[("-W 1920 -H 1080", false), ("--filter pixel -g", false), ("-W 640 -H 480", true), ("-F nearest", false)]),
+            "-W 640 -H 480 -F nearest");
+        assert_eq!(merge(&[("-W 1920", false), ("", true)]), "");
     }
 
     #[test]

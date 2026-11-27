@@ -142,9 +142,19 @@ pub struct CartDetails {
 
 /// The id of the base game in an `Extends` value, `<base game id>:<base game hash>`. The hash
 /// is only an annotation and is not checked, as hashing the base game would be too slow.
+/// `Extends=*` (ANY_GAME) is an override for every game: see `launch_entries`.
 fn extended_id(extends: &str) -> Option<String> {
     let id = extends.split_once(':').map_or(extends, |(id, _)| id).trim();
     (!id.is_empty()).then(|| id.to_string())
+}
+
+/// `Extends` of an override for every game: a cart info file (or package) whose GamescopeOptions
+/// replace any game's, e.g. a resolution for one display. It is played with every base game, is
+/// never mounted, and its other keys are ignored; a game's own DLC without Exec overrides it
+const ANY_GAME: &str = "*";
+
+fn is_override(extends: &str) -> bool {
+    extended_id(extends).as_deref() == Some(ANY_GAME)
 }
 
 /// A game that can be started: a base cart and the DLC played with it
@@ -159,14 +169,19 @@ pub struct LaunchEntry {
 /// The games that can be started with the inserted carts. Each base game is played with all of
 /// its DLC that has no Exec of its own; DLC that has one is a separate game, played with the same
 /// DLC as its base game and on top of it. DLC whose base game is not inserted is left out.
+/// Overrides for every game (`Extends=*`) are played with every base game, below its own DLC.
 pub fn launch_entries(carts: &[(PathBuf, CartDetails)]) -> Vec<LaunchEntry> {
     let mut entries = Vec::new();
+    let overrides: Vec<PathBuf> = carts.iter()
+        .filter(|(_, cart)| cart.extends.as_deref() == Some(ANY_GAME))
+        .map(|(path, _)| path.clone())
+        .collect();
     for (base_path, base) in carts.iter().filter(|(_, cart)| cart.extends.is_none()) {
         let dlc: Vec<&(PathBuf, CartDetails)> = carts.iter()
             .filter(|(_, cart)| !base.id.trim().is_empty() && cart.extends.as_deref() == Some(base.id.trim()))
             .collect();
         let add_ons: Vec<PathBuf> = dlc.iter().filter(|(_, cart)| !cart.has_exec).map(|(path, _)| path.clone()).collect();
-        let base_carts: Vec<PathBuf> = std::iter::once(base_path.clone()).chain(add_ons).collect();
+        let base_carts: Vec<PathBuf> = std::iter::once(base_path.clone()).chain(overrides.iter().cloned()).chain(add_ons).collect();
 
         entries.push(LaunchEntry { name: base.name.clone(), icon: base.icon.clone(), carts: base_carts.clone() });
         for (path, cart) in dlc.into_iter().filter(|(_, cart)| cart.has_exec) {
@@ -529,12 +544,33 @@ impl Layer {
     }
 }
 
+/// The gamescope options for `game` (the base game or DLC with Exec) played with `dlc`, merged
+/// (`session::merge_options`) from these layers, bottom to top: the display menu's resolution, the
+/// base game, DLC with Exec that runs, overrides for every game (`Extends=*`), the game's DLC
+/// without Exec. So a DLC with nothing but GamescopeOptions adapts every game it is played with to a
+/// display (e.g. 640x480 on a CRT) without changing their carts, and keeps the rest of their
+/// options. A cart with `ReplaceGamescopeOptions=true` drops the options of the layers below it.
+fn gamescope_options(resolution: &[String], base: &Layer, game: &Layer, overrides: &[&Layer], dlc: &[&Layer]) -> Vec<String> {
+    let carts: Vec<(String, bool)> = std::iter::once(base)
+        .chain(Some(game).filter(|game| !std::ptr::eq(*game, base)))
+        .chain(overrides.iter().copied())
+        .chain(dlc.iter().copied().filter(|layer| layer.attr("Exec").is_empty()))
+        .map(|layer| {
+            let replace = matches!(layer.attr("ReplaceGamescopeOptions").trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes");
+            (layer.attr("GamescopeOptions"), replace)
+        })
+        .collect();
+    let resolution = resolution.join(" ");
+    session::merge_options(std::iter::once((resolution.as_str(), false))
+        .chain(carts.iter().map(|(options, replace)| (options.as_str(), *replace))))
+}
+
 /// Mount and run a cart until the game exits or `stop` returns true. `carts` is the base cart
 /// followed by its DLC bottom to top, which is mounted on top of it; DLC last in line with its own
 /// Exec is what runs, with its own save data if it has its own Id. Otherwise DLC without Exec but
 /// with its own Id gets its own save data, and the game is not started when there are several of
 /// those. The game runs in `session` when
-/// its gamescope options allow it, otherwise the session is stopped for a gamescope of the game's own.
+/// its gamescope options (see `gamescope_options`) allow it, otherwise the session is stopped for a gamescope of the game's own.
 /// `bios` stays on screen until the game shows a window, and is stopped if the game is not started.
 fn run_cart(carts: Vec<PathBuf>, base_dir: &Path, session: &mut Option<Session>, bios: Option<RunningBios>, stop: &dyn Fn() -> bool) -> i32 {
     if stop() || carts.is_empty() {
@@ -578,20 +614,24 @@ fn run_cart(carts: Vec<PathBuf>, base_dir: &Path, session: &mut Option<Session>,
         layers.push(layer);
     }
     let base = &layers[0];
-    let dlc = &layers[1..];
+    // overrides for every game only change gamescope options, and are not mounted
+    let (overrides, dlc): (Vec<&Layer>, Vec<&Layer>) = layers[1..].iter().partition(|layer| is_override(&layer.attr("Extends")));
     // DLC with its own Exec runs instead of the base game, and changes what it sets
-    let game = dlc.last().filter(|layer| !layer.attr("Exec").is_empty()).unwrap_or(base);
+    let game = dlc.last().copied().filter(|layer| !layer.attr("Exec").is_empty()).unwrap_or(base);
     let attr = |name: &str| match game.attr(name) {
         value if value.is_empty() => base.attr(name),
         value => value,
     };
-    for layer in dlc {
+    for layer in &dlc {
         eprintln!("Playing {} with DLC {}", base.info.display(), layer.info.display());
+    }
+    for layer in &overrides {
+        eprintln!("Playing {} with override {}", base.info.display(), layer.info.display());
     }
 
     // DLC with its own Id gets save data of its own: the DLC that runs, otherwise the one DLC
     // without Exec that has one; several of those cannot share one save directory
-    let saves_with: Vec<&Layer> = dlc.iter()
+    let saves_with: Vec<&Layer> = dlc.iter().copied()
         .filter(|layer| layer.attr("Exec").is_empty() && !layer.attr("Id").is_empty())
         .collect();
     let saves_with = if !std::ptr::eq(game, base) && !game.attr("Id").is_empty() {
@@ -615,7 +655,7 @@ fn run_cart(carts: Vec<PathBuf>, base_dir: &Path, session: &mut Option<Session>,
     // a cart directory with both the game's and the DLC's cart info holds the files of both, and
     // is mounted once
     let mut dlc_dirs: Vec<&Path> = Vec::new();
-    for layer in dlc {
+    for layer in &dlc {
         if layer.dir != lower && !dlc_dirs.contains(&layer.dir.as_path()) {
             dlc_dirs.push(&layer.dir);
         }
@@ -646,10 +686,7 @@ fn run_cart(carts: Vec<PathBuf>, base_dir: &Path, session: &mut Option<Session>,
     let cart_exec = attr("Exec");
     // directory Exec runs from, relative to the cart root; the runtime changes to it
     let cart_path_dir = attr("Path");
-    let cart_gsopts: Vec<String> = match attr("GamescopeOptions") {
-        opts if opts.is_empty() => resolution_gamescope_args(),
-        opts => opts.split_whitespace().map(String::from).collect(),
-    };
+    let cart_gsopts = gamescope_options(&resolution_gamescope_args(), base, game, &overrides, &dlc);
     let cart_exec_file = cart_exec_file();
     let _ = fs::write(&cart_exec_file, format!("{}\n", cart_exec));
     // environment variables the runtime sets for the game (Linux) or for Proton (Windows), not gamescope
@@ -880,6 +917,52 @@ mod tests {
             paths(&["other.kzp"]),
         ]);
         assert_eq!(entries[1].name, "expansion");
+    }
+
+    #[test]
+    fn dlc_without_exec_overrides_the_gamescope_options() {
+        let dir = std::env::temp_dir().join(format!("kazeta-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let layer = |name: &str, info: &str| {
+            let path = dir.join(format!("{}.kzi", name));
+            fs::write(&path, info).unwrap();
+            Layer { info: path, dir: dir.clone(), media_path: dir.clone() }
+        };
+        let base = layer("base", "Id=game\nExec=game.exe\n");
+        let crt = layer("crt", "Extends=game:hash\nGamescopeOptions=-w 640 -h 480\n");
+        let plain = layer("plain", "Extends=game:hash\n");
+        let expansion = layer("expansion", "Extends=game:hash\nExec=x.exe\nGamescopeOptions=--filter pixel\n");
+        let any = layer("any", "Extends=*\nExec=ignored.exe\nGamescopeOptions=-w 320 -h 240\n");
+        assert!(is_override(&any.attr("Extends")) && !is_override(&crt.attr("Extends")));
+        let replacing = layer("replacing", "Extends=*\nGamescopeOptions=-W 800\nReplaceGamescopeOptions=true\n");
+        let resolution: Vec<String> = ["-W", "1920", "-H", "1080"].iter().map(|s| s.to_string()).collect();
+        let options = |game: &Layer, overrides: &[&Layer], dlc: &[&Layer]| gamescope_options(&resolution, &base, game, overrides, dlc).join(" ");
+        assert_eq!(options(&base, &[], &[]), "-W 1920 -H 1080");
+        assert_eq!(options(&base, &[], &[&crt, &plain]), "-W 1920 -H 1080 -w 640 -h 480");
+        assert_eq!(options(&expansion, &[], &[&plain, &expansion]), "-W 1920 -H 1080 --filter pixel");
+        assert_eq!(options(&expansion, &[], &[&crt, &expansion]), "-W 1920 -H 1080 --filter pixel -w 640 -h 480");
+        // an override for every game merges with the game's options, its own DLC go on top
+        assert_eq!(options(&expansion, &[&any], &[&plain, &expansion]), "-W 1920 -H 1080 --filter pixel -w 320 -h 240");
+        assert_eq!(options(&expansion, &[&any], &[&crt, &expansion]), "-W 1920 -H 1080 --filter pixel -w 640 -h 480");
+        assert_eq!(options(&expansion, &[&replacing], &[&crt, &expansion]), "-W 800 -w 640 -h 480");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn overrides_for_every_game_are_played_with_every_base_game() {
+        let carts = vec![
+            (PathBuf::from("game.kzp"), cart("game", None, true)),
+            (PathBuf::from("dlc.kzp"), cart("", Some("game:hash"), false)),
+            (PathBuf::from("expansion.kzp"), cart("expansion", Some("game:hash"), true)),
+            (PathBuf::from("crt.kzi"), cart("", Some("*"), false)),
+            (PathBuf::from("noid.kzp"), cart("", None, true)),
+        ];
+        let carts: Vec<Vec<PathBuf>> = launch_entries(&carts).into_iter().map(|entry| entry.carts).collect();
+        assert_eq!(carts, vec![
+            paths(&["game.kzp", "crt.kzi", "dlc.kzp"]),
+            paths(&["game.kzp", "crt.kzi", "dlc.kzp", "expansion.kzp"]),
+            paths(&["noid.kzp", "crt.kzi"]),
+        ]);
     }
 
     #[test]
