@@ -15,6 +15,8 @@ use crate::save;
 const UPDATE_PREFIX: &str = "kazeta-";
 const UPDATE_SUFFIX: &str = ".img.tar.xz";
 const DEPLOYMENTS_DIR: &str = "/frzr_root/deployments";
+/// the deploy tool required for os updates
+const FRZR_DEPLOY: &str = "/usr/bin/frzr-deploy";
 
 /// Exists while an update is being installed, so the launcher ignores the power button
 fn running_file() -> PathBuf {
@@ -41,9 +43,17 @@ fn is_update_file(path: &Path) -> bool {
     name.starts_with(UPDATE_PREFIX) && name.ends_with(UPDATE_SUFFIX) && path.is_file()
 }
 
+/// Whether the system can be updated: it is frzr-based, with frzr-deploy to deploy updates
+fn can_update() -> bool {
+    Path::new(FRZR_DEPLOY).is_file()
+}
+
 /// Find the update files at the top level of the inserted drives that are not installed yet
-/// and were not declined, highest name first
+/// and were not declined, highest name first. None are found when the system cannot be updated
 pub fn find_updates() -> Vec<PathBuf> {
+    if !can_update() {
+        return Vec::new();
+    }
     let base_ext = PathBuf::from(save::get_external_media_dir());
     let mut updates: Vec<PathBuf> = fs::read_dir(&base_ext)
         .into_iter()
